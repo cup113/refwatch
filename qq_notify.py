@@ -63,16 +63,29 @@ def _read_env_file(path: Path) -> dict[str, str]:
     return values
 
 
-def load_credentials(root: Path | None = None) -> tuple[str, str]:
+def read_credentials(root: Path | None = None) -> dict[str, str]:
+    """按优先级读出凭据，缺了也不抛 —— 设置面板要能显示「现在用的是哪一份」。
+
+    返回 {"appid", "secret", "source"}；source 是命中的位置（"环境变量" 或文件路径），
+    空串表示两样都没找到。真正发送时仍然用 load_credentials()，那里才不会静默放过缺失。
+    """
     app_id = os.environ.get("QQBOT_APPID", "")
     secret = os.environ.get("QQBOT_SECRET", "")
+    source = "环境变量" if app_id and secret else ""
     if not app_id or not secret:
         for path in env_file_candidates(root):
             values = _read_env_file(path)
             app_id = app_id or values.get("QQBOT_APPID", "")
             secret = secret or values.get("QQBOT_SECRET", "")
             if app_id and secret:
+                source = str(path)
                 break
+    return {"appid": app_id, "secret": secret, "source": source}
+
+
+def load_credentials(root: Path | None = None) -> tuple[str, str]:
+    found = read_credentials(root)
+    app_id, secret = found["appid"], found["secret"]
     if not app_id or not secret:
         tried = ", ".join(str(p) for p in env_file_candidates(root))
         raise SystemExit(f"缺少凭据：QQBOT_APPID / QQBOT_SECRET 既不在环境变量，也不在 {tried}")

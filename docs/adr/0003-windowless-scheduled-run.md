@@ -33,3 +33,18 @@
   它在目标命令运行期间枚举可见顶层窗口，0 个才算过。**改动 git 调用方式后跑一次**。
 - 将来若引入其它子进程（例如解压、调用 `gh`），同样要带这个 flag，否则同样的 bug 会以别的
   形式回来。探针是唯一的回归检查。
+
+## 后续：托盘形态（#1）
+
+托盘应用（`tray.py`）是 GUI 子系统进程，与 `pythonw.exe` 同类，所以本 ADR 的结论**一字不改地继续成立**：
+它内部所有控制台子进程（`schtasks /query`、`/delete`）都必须带 `CREATE_NO_WINDOW`，
+单点封装在 `tray.run_hidden()`，flag 直接复用 `watch._WINDOWS_SPAWN_KW`。
+`tests/test_spawn.py` 里有一条源码级结构守卫：`subprocess.run(` 在 `tray.py` 里只允许出现一次。
+
+只有探针的**目标命令**变了：常驻进程永远不会退出，探针会一直挂着。改成跑一轮就退出的入口：
+
+```powershell
+python tools\window_probe.py -- python -X utf8 tray.py --one-round --dry-run --root <临时目录>
+python tools\window_probe.py -- refwatch.exe --one-round --dry-run --root <临时目录>
+```
+

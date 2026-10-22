@@ -65,5 +65,25 @@ class SpawnFlagsTest(unittest.TestCase):
             self.assertEqual(captured["cmd"][3], "status")
 
 
+class TraySpawnStructureTest(unittest.TestCase):
+    """托盘里的子进程（schtasks 等）同样属于 ADR-0003：必须经过带 flag 的那一个入口。
+
+    源码级结构守卫，不 import pystray/tkinter —— 零依赖 CI 矩阵里也要跑。
+    新增一个绕过 run_hidden() 的 subprocess 调用 = 每轮闪窗那个 bug 回来了。
+    """
+
+    def setUp(self) -> None:
+        self.source = (HERE.parent / "tray.py").read_text(encoding="utf-8")
+
+    def test_all_subprocess_calls_go_through_the_hidden_helper(self) -> None:
+        self.assertEqual(self.source.count("subprocess.run("), 1, "子进程调用必须收敛到 run_hidden()")
+        self.assertEqual(self.source.count("subprocess.Popen("), 0)
+        self.assertEqual(self.source.count("os.system("), 0)
+
+    def test_the_helper_uses_the_shared_no_window_flag(self) -> None:
+        self.assertIn("_SPAWN_KW: dict = dict(watch._WINDOWS_SPAWN_KW)", self.source)
+        self.assertIn("**_SPAWN_KW", self.source)
+
+
 if __name__ == "__main__":
     unittest.main()

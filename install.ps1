@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     refwatch 一键安装：部署到运行目录 -> 建立首个基线 -> 注册计划任务。
 
@@ -59,10 +59,13 @@ if (Test-Path $pythonw) {
     Write-Warning "没有 pythonw.exe：计划任务会每轮闪一次控制台窗口（git 子进程另有防护）"
 }
 
-$programFiles = @('watch.py', 'qq_notify.py')
+$programFiles = @('watch.py', 'qq_notify.py', 'settings.py', 'scheduler.py', 'panel.py', 'tray.py')
 foreach ($name in $programFiles) {
     if (-not (Test-Path (Join-Path $Source $name))) { Fail "缺少源文件: $(Join-Path $Source $name)" }
 }
+$assetFiles = @('refwatch.ico', 'refwatch.png') |
+    ForEach-Object { Join-Path $Source ('assets\' + $_) } |
+    Where-Object { Test-Path $_ }
 $docFiles = @('README.md', 'README.zh-CN.md', 'LICENSE') |
     ForEach-Object { Join-Path $Source $_ } |
     Where-Object { Test-Path $_ }
@@ -78,8 +81,12 @@ Ok $Dest
 Step "2/6 拷贝程序文件"
 foreach ($name in $programFiles) { Copy-Item (Join-Path $Source $name) $Dest -Force }
 foreach ($doc in $docFiles) { Copy-Item $doc $Dest -Force }
+if ($assetFiles) {
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dest 'assets') | Out-Null
+    foreach ($asset in $assetFiles) { Copy-Item $asset (Join-Path $Dest 'assets') -Force }
+}
 Copy-Item $exampleConfig $Dest -Force
-Ok "watch.py / qq_notify.py / 文档 / config.example.json"
+Ok "watch.py / 托盘模块（settings / scheduler / panel / tray）/ assets / 文档 / config.example.json"
 
 Step "3/6 配置文件（绝不覆盖已有配置）"
 $configPath = Join-Path $Dest 'config.json'
@@ -101,6 +108,27 @@ if (Test-Path $envPath) {
     Info "凭据来自环境变量，无需 .env"
 } else {
     Write-Host "  提醒：把 QQBOT_APPID / QQBOT_SECRET 写进 $envPath（一行一个 KEY=VALUE）" -ForegroundColor Yellow
+}
+
+# 把 -Minutes 同步进 config.json 的 interval_minutes：计划任务的触发器间隔和托盘读的这个键
+# 必须是同一个数，否则「设置」里显示的和实际跑的对不上。
+# 注意两个 PS 陷阱：5.1 的 ConvertTo-Json 默认 -Depth 2 会截断，Set-Content -Encoding UTF8
+# 会写 BOM（Python 侧 json.loads 会因此失败）—— 所以显式 -Depth 10 + 无 BOM 写回。
+if (Test-Path $configPath) {
+    try {
+        $raw = Get-Content $configPath -Raw -Encoding UTF8
+        $cfg = $raw | ConvertFrom-Json
+        if ($cfg.interval_minutes -ne $Minutes) {
+            $cfg | Add-Member -NotePropertyName interval_minutes -NotePropertyValue $Minutes -Force
+            $json = $cfg | ConvertTo-Json -Depth 10
+            [System.IO.File]::WriteAllText($configPath, ($json + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+            Ok "config.json 的 interval_minutes 已同步为 $Minutes 分钟"
+        } else {
+            Info "interval_minutes 已经是 $Minutes"
+        }
+    } catch {
+        Write-Warning "无法把 -Minutes 写进 config.json（文件保持原样）：$($_.Exception.Message)"
+    }
 }
 
 Step "4/6 语法检查"
@@ -179,6 +207,17 @@ Ok "计划任务 $TaskName 已注册"
 
 Write-Host "`n全部完成。" -ForegroundColor Green
 Write-Host @"
+
+两种运行形态，二选一（同时用只会在 .lock 上互相跳过）：
+
+  A) 托盘应用（推荐，Windows 上的默认形态）
+       "$pythonw" -X utf8 "$Dest\tray.py"
+     图标进通知区域；右键有「设置…」「立即运行一轮」「预览（不发送）」。
+     想让它登录就自启：托盘菜单里勾「开机自启」，或直接用 Inno 安装包（自启可勾选）。
+     用了托盘之后，把下面的计划任务移除，避免两套调度抢锁。
+
+  B) 计划任务（无头 / 服务器 / 不想常驻托盘）
+     已按上一步注册，每 $Minutes 分钟跑一次。
 
 验证清单：
   1) 立刻跑一次：   Start-ScheduledTask -TaskName '$TaskName'

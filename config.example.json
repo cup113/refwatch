@@ -15,5 +15,8 @@
   "fetch_timeout_sec": 300,
   "fail_alert_threshold": 3,
   "lock_stale_sec": 1800,
-  "git_ssl_backend": "openssl"
+  "git_ssl_backend": "openssl",
+  "interval_minutes": 30,
+  "autostart": true,
+  "task_prompt_done": false
 }

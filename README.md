@@ -1,8 +1,14 @@
 # refwatch
 
 Watch **every branch and tag** of a GitHub repository and get a digest of new commits on QQ.
-Plain Python scripts, no dependencies, no daemon, no AI in the loop — it runs unattended from a
-scheduled task.
+
+Two shapes, one engine, no AI in the loop:
+
+- **Tray app** (the Windows default): lives in the notification area, edit the watch list in a window,
+  run a round or preview one whenever you like.
+- **Command line**: `python watch.py`, standard library only, driven by Task Scheduler or cron.
+
+What lands in QQ:
 
 ```
 [acme/widget] 2 个 ref 有更新  (时间 UTC+0800)
@@ -18,201 +24,214 @@ scheduled task.
 * 新分支: feat/login  (c3d4e5f 登录页骨架)
 ```
 
-## Why the state is a ref → SHA map
+And what you configure it with:
 
-Most "watch a repo" tools diff commits. That cannot tell a force-push from a normal update from a
-deleted branch. refwatch stores, per ref, the SHA it saw last time, and compares that to the SHA it
-sees now. That yields four distinct events:
+![Settings panel](docs/screenshots/panel-repos.png)
 
-| event | meaning | how it is detected |
-|---|---|---|
-| **update** | new commits on a branch | old SHA is an ancestor of the new one |
-| **rewritten** | force-push / rebase / moved tag | old SHA is not an ancestor of the new one |
-| **new** | branch or tag appeared | ref is not in the state at all |
-| **deleted** | branch or tag is gone | ref was in the state, `fetch --prune` made it vanish |
+---
 
-The first run for a repository is **silent**: it records a baseline instead of pushing years of
-history at you. See [docs/adr/0001](docs/adr/0001-state-is-ref-to-sha.md).
+## Quick start
 
-## Requirements
+### A. Tray app (recommended)
 
-- **Python 3.9+** (standard library only — nothing to `pip install`)
-- **Git** on `PATH`
-- A **QQ bot** (AppID + AppSecret) and the recipient's `openid` — only if you want notifications
-- For scheduled runs: Windows Task Scheduler (below), or `cron`/`systemd` on Linux/macOS
-
-## Quick start (Windows)
+Needs **Git** on `PATH`; the source shape also needs Python 3.9+ and two packages.
 
 ```powershell
 git clone https://github.com/cup113/refwatch
 cd refwatch
+python -m pip install -r requirements-gui.txt
+pythonw tray.py
+```
+
+Or run the released `refwatch-setup-<version>.exe` (per-user install, no administrator needed).
+Then right-click the icon → "打开设置…" → fill in repositories and credentials → save; effective immediately.
+
+### B. Command line / headless (Task Scheduler or cron)
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-`install.ps1` deploys to `%LOCALAPPDATA%\refwatch`, runs a silent baseline, then registers a
-scheduled task that runs every 30 minutes. It is idempotent and **never overwrites** your
-`config.json`, `state.json`, mirrors or logs.
+Deploys to `%LOCALAPPDATA%\refwatch`, builds a silent baseline, registers a task that runs every 30
+minutes. Idempotent, and it **never overwrites** `config.json` / `state.json` / mirrors / logs.
+Options: `-Dest 'D:\gh-watch'`, `-Minutes 60`, `-NoTask`.
 
-Then fill in the two files it created:
+> The tray and the scheduled task are **alternatives** — running both only makes them skip each other
+> on `.lock`. On first start the tray asks once whether to remove the old task.
 
-1. `config.json` — at least `repos` and `openid`:
+Both shapes need `repos` (`["owner/name"]`), the recipient's `openid`, and the bot credentials
+`QQBOT_APPID` / `QQBOT_SECRET` (in `.env` inside the data directory; environment variables win).
+`openid` is the recipient's C2C id as reported by the bot's message events; AppID/AppSecret come from
+a bot app on the [QQ open platform](https://q.qq.com/).
 
-   ```json
-   {
-     "repos": ["owner/name"],
-     "openid": "YOUR_QQ_OPENID"
-   }
-   ```
-
-2. `.env` next to it — the bot credentials:
-
-   ```
-   QQBOT_APPID=123456789
-   QQBOT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxx
-   ```
-
-   (Environment variables `QQBOT_APPID` / `QQBOT_SECRET` win over this file.)
-
-Check it without sending anything:
+Dry-run it once — nothing is sent:
 
 ```powershell
 python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\refwatch" --dry-run
 ```
 
-Options: `-Dest 'D:\gh-watch'` (deploy elsewhere), `-Minutes 60`, `-NoTask` (deploy only).
+---
 
-### Getting the QQ pieces
+## What it watches: ref → SHA, not diffs
 
-The bot credentials come from the QQ open platform (`AppID` / `AppSecret`). The `openid` is the
-recipient's C2C id as reported by the bot's message events — send the bot one message and read it
-from the event payload. Proactive messages are rate limited per relationship (20/minute,
-1000/day), which is exactly why this tool sends a digest with links instead of raw diffs.
+Each ref remembers the SHA it had last time. That separates four cases a diff cannot tell apart:
+
+| event | meaning | how it is detected |
+|---|---|---|
+| **update** | new commits on a branch | old SHA is an ancestor of the new one |
+| **rewritten** | force-push / rebase / moved tag | old SHA is *not* an ancestor |
+| **new** | branch or tag appeared | the ref is not in the baseline |
+| **deleted** | branch or tag is gone | it was in the baseline, `fetch --prune` removed it |
+
+The first round for a repository is **silent**: it records a baseline instead of pushing years of
+history at you. `refs/pull/*` is **never** tracked (GitHub broadcasts every PR as a ref — hundreds on
+busy repositories). Rationale: [ADR-0001](docs/adr/0001-state-is-ref-to-sha.md),
+[ADR-0002](docs/adr/0002-heads-and-tags-only.md).
+
+---
 
 ## Configuration
 
-`config.json` sits next to `watch.py`. Every key is optional except `repos`:
+`config.json` lives in the data directory (`%LOCALAPPDATA%\refwatch` for the tray). Everything except
+`repos` is optional, and everything the tray can edit is in the settings panel.
 
 | key | default | meaning |
 |---|---|---|
 | `repos` | `[]` | `["owner/name", ...]` to watch |
-| `exclude_ref_patterns` | `["refs/heads/dependabot/*", "refs/heads/renovate/*"]` | fnmatch patterns to skip |
+| `exclude_ref_patterns` | `dependabot/*`, `renovate/*` | fnmatch patterns to skip |
 | `max_commits_per_ref` | `15` | newest N commits listed per branch |
-| `max_chunks_per_repo` | `2` | messages per repository per run |
+| `max_chunks_per_repo` | `2` | messages per repository per round |
 | `chunk_limit` | `4500` | characters per message |
 | `openid` | `""` | recipient; falls back to `QQBOT_OPENID` |
 | `notify` | `true` | `false` = record state, never send |
 | `fetch_timeout_sec` | `300` | per-repository `git fetch` timeout |
-| `fail_alert_threshold` | `3` | consecutive failures before one alert message |
-| `lock_stale_sec` | `1800` | a lock older than this is considered abandoned |
-| `git_ssl_backend` | `"openssl"` | Windows only; `""` disables the `-c http.sslBackend=` injection |
+| `fail_alert_threshold` | `3` | consecutive failures before one alert |
+| `lock_stale_sec` | `1800` | a lock older than this is abandoned |
+| `git_ssl_backend` | `"openssl"` | Windows only; `""` disables the injection |
+| `interval_minutes` | `30` | the tray's schedule (`install.ps1 -Minutes` writes it too) |
+| `autostart` | `true` | start at login; the tray reconciles `HKCU\...\Run` to it |
+| `task_prompt_done` | `false` | bookmark: the old scheduled task has been asked about |
 
-`refs/pull/*` is **never** tracked, no matter what: GitHub broadcasts every PR as a ref (hundreds on
-busy repositories), and tracking them means a message per PR push. That is also why the mirror is
-created with `git init --bare` + explicit refspecs instead of `git clone --mirror`
-(see [docs/adr/0002](docs/adr/0002-heads-and-tags-only.md)).
+---
 
-## Running it
+## Tray app
 
-```bash
-python watch.py                        # one round (config.json next to the script)
-python watch.py --root D:\data         # data dir: state.json, repos/, logs/
-python watch.py --config other.json    # alternate config file
-python watch.py --repo owner/name      # only this repository
-python watch.py --dry-run              # print messages; do not send, do not advance state
-python watch.py --no-notify            # advance state/log only
+Right-click the icon:
+
+| item | what it does |
+|---|---|
+| status / next run | read-only |
+| 立即运行一轮 | a manual round: does not change the schedule or move the next run |
+| 预览（不发送） | same as `--dry-run`: renders what would be sent, **sends nothing, keeps the baseline** |
+| 打开设置… | the settings panel (double-click does the same) |
+| 打开日志 / 打开数据目录 | open Explorer |
+| 开机自启 | toggle; `autostart` is the truth, the registry value is its projection |
+| 暂停调度 | stops automatic scheduling only; manual rounds still work (resets on restart) |
+| 退出 | stop the scheduler, remove the icon |
+
+Panel tabs: [repositories](docs/screenshots/panel-repos.png) ·
+[notifications](docs/screenshots/panel-notify.png) · [schedule](docs/screenshots/panel-schedule.png) ·
+[advanced](docs/screenshots/panel-advanced.png) · [log drawer](docs/screenshots/panel-log.png)
+
+Guarantees worth knowing:
+
+- **Merge writes**: keys the panel does not know survive; a broken file is backed up to
+  `config.json.bak.<timestamp>` first; writes are atomic so a concurrent round never reads half a file.
+- **Credentials only go to `.env`**, never into `config.json`; the panel shows where it read them from.
+- **Single instance**: a second launch tells you it is already running and that the icon may be folded
+  into the taskbar's `^` area.
+- Crashes are visible: uncaught exceptions go to `logs/crash.log` (credentials redacted) and to a
+  message box — never "double-click does nothing".
+- The tray's own `schtasks` children also carry `CREATE_NO_WINDOW`, so no black window flashes
+  (same rule as [ADR-0003](docs/adr/0003-windowless-scheduled-run.md)).
+
+Building the exe (CI does it on every `v*` tag):
+
+```powershell
+python -m pip install -r requirements-gui.txt nuitka
+python -m nuitka --standalone --enable-plugin=tk-inter --windows-console-mode=disable `
+    --windows-icon-from-ico=assets/refwatch.ico --output-dir=build --output-filename=refwatch.exe tray.py
+iscc /DAPP_VERSION=v1.2.0 installer.iss        # requires Inno Setup 6
+build\tray.dist\refwatch.exe --one-round --dry-run --root <empty dir>   # smoke: expect exit code 2
 ```
+
+---
+
+## Operations
+
+| I want to… | how |
+|---|---|
+| change the watch list | tray "打开设置…", or edit `repos` in `config.json` (a new repo starts silent) |
+| make it quieter | add patterns to `exclude_ref_patterns`, e.g. `refs/heads/codex/*` |
+| reset a baseline | delete that repository's entry in `state.json`, or the whole file (no button on purpose) |
+| fix a broken mirror | delete `repos/<owner>__<name>.git`; it is rebuilt next round (delete its state entry to skip the backlog) |
+| mute temporarily | "暂停调度" in the tray, or `notify: false` |
+| see what happened | `logs/watch-YYYYMMDD.log`; exceptions in `logs/crash.log` (tray) or `logs/error.log` (CLI) |
+| go back to a scheduled task | quit the tray and re-run `install.ps1`; config and baselines are untouched |
 
 Exit codes: `0` ok, `1` could not send (credentials/token), `2` configuration problem.
 
-## Scheduled runs (Windows)
+CLI flags:
 
-The task action points **directly at `pythonw.exe`** — never at a `.cmd`/`.bat` wrapper, because
-`cmd.exe` is a console program and would flash a window on every run:
-
-```powershell
-$act = New-ScheduledTaskAction -Execute "$env:LOCALAPPDATA\Python\bin\pythonw.exe" `
-       -Argument '-X utf8 "C:\path\to\watch.py" --root "C:\path\to\data"'
-$trg = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 30)
-$set = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
-       -ExecutionTimeLimit (New-TimeSpan -Minutes 15) `
-       -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-Register-ScheduledTask -TaskName 'refwatch' -Action $act -Trigger $trg -Settings $set -Force
+```bash
+python watch.py                        # one round
+python watch.py --root D:\data         # data dir (state.json, repos/, logs/)
+python watch.py --config other.json    # alternate config file
+python watch.py --repo owner/name      # only this repository
+python watch.py --dry-run              # print only; do not send, do not advance the baseline
+python watch.py --no-notify            # advance state, send nothing
 ```
 
-`pythonw` alone is not enough, though — see below.
-
-### Why there is no black window flash
-
-`pythonw.exe` has no console, so it never shows a window itself. But every `git` call it spawns is a
-**console-subsystem program**, and Windows allocates a *new console window* for a console process
-whose parent has none. With 5–8 git invocations per repository per round, that is a handful of black
-flashes every 30 minutes. `watch.py` therefore starts git with `CREATE_NO_WINDOW`; measured on
-Windows 11, one `git fetch` spawned from `pythonw`:
-
-| scenario | new visible windows |
-|---|---|
-| no flag | 1 × `ConsoleWindowClass` (`git.exe`) |
-| `CREATE_NO_WINDOW` | 0 |
-
-Re-prove it any time with the bundled probe (it counts *console* windows while your command runs, so
-a regression fails loudly instead of silently; unrelated windows are printed as `[noise]` and ignored):
-
-```powershell
-python tools\window_probe.py -- pythonw.exe -X utf8 watch.py --root . --dry-run
-# [probe] 目标退出码 0，观察 4.2s，新控制台窗口 0 个，其它新窗口 0 个
-```
-
-Details and rejected alternatives: [docs/adr/0003](docs/adr/0003-windowless-scheduled-run.md).
-
-### Linux / macOS
-
-No window problem exists there; use cron:
+Linux / macOS: use cron (no tray, and no black-window problem there):
 
 ```cron
 */30 * * * * cd /opt/refwatch && python3 watch.py --root /opt/refwatch >> logs/cron.log 2>&1
 ```
 
-## Operations
-
-- **Change the watch list** — edit `repos` in `config.json`. A new repository gets a silent baseline
-  on its first round.
-- **Too noisy** — add patterns to `exclude_ref_patterns`, e.g. `refs/heads/codex/*`.
-- **Reset a baseline** (after changing exclusions, or to skip a backlog): delete that repository's
-  entry from `state.json`, or delete `state.json` entirely.
-- **Broken mirror** — delete `repos/<owner>__<name>.git`; it is re-created on the next round. The old
-  SHAs in `state.json` still exist, so you will get one digest covering the outage — delete the
-  repository's `state.json` entry too if you do not want that.
-- **Failure alerts** — after `fail_alert_threshold` consecutive fetch failures one message is sent,
-  then silence until it recovers (the counter resets on success).
-- **Logs** — `logs/watch-YYYYMMDD.log`; uncaught exceptions (which `pythonw` would otherwise swallow)
-  go to `logs/error.log`.
-- **Overlapping runs** — prevented by `.lock`; a lock older than `lock_stale_sec` is taken over.
+---
 
 ## Development
 
 ```bash
 python -m ruff check .
-python -m unittest discover -s tests
+python -m unittest discover -s tests           # zero third-party deps: what CI runs
+python -m pip install -r requirements-gui.txt  # only for the tray / packaging
 ```
 
-The suite is offline: it creates throwaway repositories under the system temp dir (override with
-`REFWATCH_TEST_TMP`) and uses them as the `origin`. Notes:
+The suite is offline: throwaway repositories under the system temp dir (override with
+`REFWATCH_TEST_TMP`) serve as the `origin`.
 
-- Running the suite inside a restrictive Windows sandbox (ACL-restricted token, no named pipes) can
-  fail in `git`'s *local* transport, which forks `sh.exe`. Run it in a normal terminal or CI.
-- `REFWATCH_TEST_TMP` also helps when the system temp dir is not writable.
+- In an ACL-restricted Windows sandbox, git's *local* transport forks `sh.exe` and fails — run the
+  suite in a normal terminal or CI.
+- Tray tests skip themselves without `pystray`/`PIL`; `test_icon` and the structural guards in
+  `test_spawn` use only the standard library.
 
-Layout: `watch.py` (fetch/diff/format), `qq_notify.py` (QQ API + credentials, usable standalone),
-`install.ps1` (deploy + task), `tools/window_probe.py` (window regression check), `tests/`.
+| file | role |
+|---|---|
+| `watch.py` | engine + CLI; `run_round()` is the only implementation of a round |
+| `qq_notify.py` | QQ API + credential lookup, usable standalone |
+| `settings.py` | `config.json` / `.env` / autostart registry reads and writes (no GUI imports) |
+| `scheduler.py` | fires a round every `interval_minutes` |
+| `panel.py` | tkinter settings panel (top half is pure, testable logic) |
+| `tray.py` | tray entry: single instance, menu, thread bridge, `--one-round` passthrough |
+| `install.ps1` / `installer.iss` | headless deploy / tray installer |
+| `tools/` | `window_probe.py` (window regression check), `make_icon.py` (icon generator, artifacts committed) |
 
-Adding a delivery channel means replacing one function — `deliver()` in `watch.py`
-(see [docs/adr/0004](docs/adr/0004-qq-only-with-notifier-seam.md)).
+A delivery channel is one function — `deliver()` in `watch.py`
+([ADR-0004](docs/adr/0004-qq-only-with-notifier-seam.md)). Tray history and trade-offs:
+[ADR-0005](docs/adr/0005-tray-app-replaces-scheduled-task.md),
+[ADR-0006](docs/adr/0006-tray-stack-pystray-pillow-tk.md),
+[ADR-0007](docs/adr/0007-distribution-nuitka-standalone-inno.md).
+
+---
 
 ## Not implemented (on purpose)
 
-- Long digests as a **file** upload: currently truncated with a compare link instead.
-- **Retry queue** for failed sends: the failure is logged, the next round collects again.
-- LLM summaries: that would put an AI back in the loop; this tool is deliberately dumb.
+- Long digests as a **file** upload: truncated with a compare link instead.
+- **Retry queue** for failed sends: logged, collected again next round.
+- LLM summaries: that would put an AI back in the loop.
+- Destructive maintenance in the panel (reset baseline / delete mirror): v1 edits config and previews only.
+- Code signing, auto-update, single-file exe.
 
 ## License
 
