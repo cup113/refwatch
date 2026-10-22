@@ -42,7 +42,8 @@ python -m pip install -r requirements-gui.txt
 pythonw tray.py
 ```
 
-或者直接用发行版里的 `refwatch-setup-<version>.exe`（每用户安装，不需要管理员）。
+或者直接下载 [最新发行版](https://github.com/cup113/refwatch/releases/latest)：`refwatch-setup-<version>.exe`
+（每用户安装，不需要管理员），或免安装的 `refwatch-<version>-win64.zip`。
 然后右键图标 →「打开设置…」→ 填仓库和凭据 → 保存，立刻生效。
 
 ### B. 命令行 / 无头（计划任务或 cron）
@@ -145,7 +146,7 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 python -m pip install -r requirements-gui.txt nuitka
 python -m nuitka --standalone --enable-plugin=tk-inter --windows-console-mode=disable `
     --windows-icon-from-ico=assets/refwatch.ico --output-dir=build --output-filename=refwatch.exe tray.py
-iscc /DAPP_VERSION=v1.2.0 installer.iss        # 需要 Inno Setup 6
+iscc /DAPP_VERSION=v1.0.0 installer.iss        # 需要 Inno Setup 6
 build\tray.dist\refwatch.exe --one-round --dry-run --root <空目录>   # 冒烟：期望退出码 2
 ```
 
@@ -213,6 +214,8 @@ python -m pip install -r requirements-gui.txt  # 只有要跑托盘/打包才需
 托盘形态的来龙去脉：[ADR-0005](docs/adr/0005-tray-app-replaces-scheduled-task.md)、
 [ADR-0006](docs/adr/0006-tray-stack-pystray-pillow-tk.md)、
 [ADR-0007](docs/adr/0007-distribution-nuitka-standalone-inno.md)。
+
+变更历史见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---
 

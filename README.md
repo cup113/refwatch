@@ -43,7 +43,9 @@ python -m pip install -r requirements-gui.txt
 pythonw tray.py
 ```
 
-Or run the released `refwatch-setup-<version>.exe` (per-user install, no administrator needed).
+Or grab the [latest release](https://github.com/cup113/refwatch/releases/latest):
+`refwatch-setup-<version>.exe` (per-user install, no administrator needed) or the portable
+`refwatch-<version>-win64.zip`.
 Then right-click the icon → "打开设置…" → fill in repositories and credentials → save; effective immediately.
 
 ### B. Command line / headless (Task Scheduler or cron)
@@ -151,7 +153,7 @@ Building the exe (CI does it on every `v*` tag):
 python -m pip install -r requirements-gui.txt nuitka
 python -m nuitka --standalone --enable-plugin=tk-inter --windows-console-mode=disable `
     --windows-icon-from-ico=assets/refwatch.ico --output-dir=build --output-filename=refwatch.exe tray.py
-iscc /DAPP_VERSION=v1.2.0 installer.iss        # requires Inno Setup 6
+iscc /DAPP_VERSION=v1.0.0 installer.iss        # requires Inno Setup 6
 build\tray.dist\refwatch.exe --one-round --dry-run --root <empty dir>   # smoke: expect exit code 2
 ```
 
@@ -222,6 +224,8 @@ A delivery channel is one function — `deliver()` in `watch.py`
 [ADR-0005](docs/adr/0005-tray-app-replaces-scheduled-task.md),
 [ADR-0006](docs/adr/0006-tray-stack-pystray-pillow-tk.md),
 [ADR-0007](docs/adr/0007-distribution-nuitka-standalone-inno.md).
+
+Release history: [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
