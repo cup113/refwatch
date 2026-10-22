@@ -13,9 +13,9 @@ jobs:
   windows-exe:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           # 必须 3.13，不能跟着升到 3.14：3.13 还带磁盘上的 tcl\tcl8.6，Nuitka 的 tk-inter 插件
           # 直接就能找到；3.14 换成 Tcl 9（zip 包 / DLL 内 zipfs 两种布局），插件会
@@ -108,7 +108,7 @@ jobs:
 
       - name: release
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             Output/refwatch-setup-${{ steps.ver.outputs.name }}.exe
