@@ -40,14 +40,16 @@ jobs:
           $raw = "${{ github.ref_name }}"
           if (-not $raw) { $raw = "0.0.0-dev" }
           $name = $raw -replace '^v', ''
+          # 分支名可能带 `/`（workflow_dispatch 时就是分支名）：文件名必须干净。
+          $safe = $name -replace '[^0-9A-Za-z._-]', '-'
           # --file-version 只认数字点分格式（A.B.C[.D]），所以另算一份。
           $parts = @(($name -replace '[^0-9.]', '') -split '\.' | Where-Object { $_ -ne '' })
           while ($parts.Count -lt 3) { $parts += '0' }
           if ($parts.Count -gt 4) { $parts = $parts[0..3] }
           $numeric = $parts -join '.'
-          "name=$name" >> $env:GITHUB_OUTPUT
+          "name=$safe" >> $env:GITHUB_OUTPUT
           "numeric=$numeric" >> $env:GITHUB_OUTPUT
-          Write-Host "tag=$raw name=$name numeric=$numeric"
+          Write-Host "tag=$raw name=$safe numeric=$numeric"
 
       - name: build standalone exe
         shell: pwsh
