@@ -1,0 +1,20 @@
+# 运行产物（每台机器自己的，不进仓库）
+config.json
+.env
+state.json
+state.json.tmp
+.lock
+repos/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.ruff_cache/
+.pytest_cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

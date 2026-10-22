@@ -1,0 +1,19 @@
+{
+  "repos": [
+    "owner/name",
+    "another-owner/another-name"
+  ],
+  "exclude_ref_patterns": [
+    "refs/heads/dependabot/*",
+    "refs/heads/renovate/*"
+  ],
+  "max_commits_per_ref": 15,
+  "max_chunks_per_repo": 2,
+  "chunk_limit": 4500,
+  "openid": "",
+  "notify": true,
+  "fetch_timeout_sec": 300,
+  "fail_alert_threshold": 3,
+  "lock_stale_sec": 1800,
+  "git_ssl_backend": "openssl"
+}
