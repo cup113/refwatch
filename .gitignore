@@ -13,6 +13,15 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 
+# 打包产物（Nuitka / Inno Setup）
+build/
+Output/
+*.build/
+*.dist/
+*.onefile-build/
+config.json.tmp
+.env.tmp
+
 # 编辑器 / 系统
 .vscode/
 .idea/

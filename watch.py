@@ -16,6 +16,9 @@
     python watch.py --dry-run            # 只打印将要发送的消息，不发送、不推进状态
     python watch.py --repo owner/name    # 只检查指定仓库
     python watch.py --config <path>      # 指定配置文件
+
+本文件既是引擎也是 CLI 入口：一轮的全部逻辑在 run_round()，main() 只负责解析参数并把
+RoundReport 翻成退出码。托盘应用（tray.py）用同一份 run_round()，所以「一轮」的定义只有一处。
 """
 
 from __future__ import annotations
@@ -26,9 +29,11 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from fnmatch import fnmatch
 from pathlib import Path
+from typing import Callable
 
 HERE = Path(__file__).resolve().parent
 # 推送器与监视器同目录（发布形态就是两个平铺文件）。
@@ -64,6 +69,10 @@ DEFAULT_CONFIG: dict = {
     "fail_alert_threshold": 3,
     "lock_stale_sec": 1800,
     "git_ssl_backend": "openssl",
+    # 下面三个只对托盘应用有意义；CLI 读同一个 config.json，不理会它们。
+    "interval_minutes": 30,
+    "autostart": True,
+    "task_prompt_done": False,
 }
 
 
@@ -432,7 +441,12 @@ def deliver(text: str, cfg: dict, token: str) -> None:
 # ---------------------------------------------------------------- 一轮检查
 
 
-def check_repo(root: Path, slug: str, state: dict, cfg: dict, dry_run: bool) -> list[str]:
+def check_repo(root: Path, slug: str, state: dict, cfg: dict) -> list[str]:
+    """检查一个仓库，返回待发送的分片（无变化返回 []）。
+
+    只负责「看」：是否落盘 state.json、是否真的发送，都由调用方（run_round）决定 ——
+    dry-run 不推进 ref 基线正是靠调用方不落盘，而不是靠这里分叉。
+    """
     mirror, fresh = ensure_mirror(root, slug, cfg)
     if fresh:
         fetch_mirror(mirror, cfg["fetch_timeout_sec"], cfg)
@@ -524,11 +538,141 @@ def check_repo(root: Path, slug: str, state: dict, cfg: dict, dry_run: bool) -> 
     if len(parts) > cfg["max_chunks_per_repo"]:
         parts = parts[: cfg["max_chunks_per_repo"]]
         parts[-1] += "\n...(内容过长已截断)"
-    if dry_run:
-        for i, part in enumerate(parts, 1):
-            say(f"\n===== DRY-RUN {slug} [{i}/{len(parts)}] ({len(part)} 字) =====\n{part}")
-        return []
     return parts
+
+
+@dataclass(frozen=True)
+class RoundReport:
+    """一轮的结果。CLI 用它算退出码，托盘应用用它更新状态行与预览抽屉。"""
+
+    repos: int = 0
+    parts: list[str] = field(default_factory=list)  # 待发/已发的分片（预览时就是将要发的内容）
+    sent: int = 0
+    failures: int = 0
+    skipped: str | None = None  # "lock"：上一轮仍在运行
+    status: str = "ok"  # ok / dry-run / not-sent / no-openid / token-failed / no-repos
+
+    @property
+    def exit_code(self) -> int:
+        """与引入托盘前 main() 的返回值逐字一致：0 正常，1 发不出去，2 配置有问题。"""
+        if self.status == "no-repos":
+            return 2
+        if self.status in ("no-openid", "token-failed"):
+            return 1
+        return 0
+
+
+def run_round(
+    root: Path,
+    cfg: dict,
+    repos: list[str] | None = None,
+    *,
+    dry_run: bool = False,
+    no_notify: bool = False,
+    deliver_fn: Callable[[str, dict, str], None] | None = None,
+    on_event: Callable[[dict], None] | None = None,
+) -> RoundReport:
+    """跑一轮：取锁 → 逐仓库 fetch/比对 → 发送 → 落盘状态。
+
+    dry_run 只打印不发送、**不推进 ref 基线**（不 save_state）；no_notify 推进状态但不发送。
+    这是本工具唯一的「一轮」实现，CLI 与托盘都走这里。
+    """
+    run_repos = list(repos if repos is not None else cfg["repos"])
+    send = deliver_fn or deliver
+    emit = on_event or (lambda _event: None)
+
+    def finish(report: RoundReport) -> RoundReport:
+        emit({"kind": "round-done", "status": report.status, "sent": report.sent})
+        return report
+
+    if not run_repos:
+        log(root, f"配置里没有仓库清单（{cfg.get('_config_path')} 的 repos）", "ERROR")
+        return finish(RoundReport(status="no-repos"))
+
+    with Lock(root, cfg["lock_stale_sec"]) as acquired:
+        if not acquired:
+            log(root, "上一轮仍在运行（.lock 未过期），本轮跳过")
+            return finish(RoundReport(repos=len(run_repos), skipped="lock"))
+
+        emit({"kind": "round-start", "repos": len(run_repos), "dry_run": dry_run})
+        state = load_state(root)
+        pending: list[str] = []
+        previewed: list[str] = []  # dry-run 的分片：只进报告，永不进发送队列
+        failures = 0
+        for slug in run_repos:
+            emit({"kind": "repo-start", "repo": slug})
+            try:
+                parts = check_repo(root, slug, state, cfg)
+                if dry_run:
+                    for i, part in enumerate(parts, 1):
+                        say(f"\n===== DRY-RUN {slug} [{i}/{len(parts)}] ({len(part)} 字) =====\n{part}")
+                    previewed.extend(parts)
+                else:
+                    pending.extend(parts)
+                emit({"kind": "repo-done", "repo": slug, "parts": len(parts)})
+            except GitError as exc:
+                failures += 1
+                emit({"kind": "repo-error", "repo": slug, "error": str(exc)})
+                entry = state["repos"].setdefault(slug, {"refs": {}, "fail_count": 0, "fail_alerted": False})
+                entry["fail_count"] = int(entry.get("fail_count", 0)) + 1
+                log(root, f"{slug}: 检查失败（连续 {entry['fail_count']} 次）: {exc}", "ERROR")
+                if entry["fail_count"] >= cfg["fail_alert_threshold"] and not entry.get("fail_alerted"):
+                    entry["fail_alerted"] = True
+                    pending.append(
+                        f"[refwatch] {slug} 已连续 {entry['fail_count']} 次抓取失败，最后一次错误：\n{exc}\n"
+                        f"（修复后会自动恢复，不会再重复提醒）"
+                    )
+            finally:
+                if not dry_run:  # dry-run 只是预览，不能推进状态，否则真跑时就不报了
+                    save_state(root, state)
+
+        if dry_run or no_notify or not cfg.get("notify", True):
+            if pending and dry_run:
+                for part in pending:
+                    say(f"\n===== DRY-RUN 通知 =====\n{part}")
+            log(root, f"本轮结束：{len(run_repos)} 个仓库，{failures} 个失败，{len(pending)} 条待发（未发送）")
+            return finish(
+                RoundReport(
+                    repos=len(run_repos),
+                    parts=previewed + pending,  # 预览分片只出现在报告里，不会被发送
+                    failures=failures,
+                    status="dry-run" if dry_run else "not-sent",
+                )
+            )
+
+        if not pending:
+            log(root, f"本轮结束：{len(run_repos)} 个仓库，无变化")
+            return finish(RoundReport(repos=len(run_repos), failures=failures))
+
+        if not cfg.get("openid"):
+            log(root, "配置里没有 openid（或环境变量 QQBOT_OPENID），本轮消息未发送", "ERROR")
+            return finish(
+                RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="no-openid")
+            )
+
+        try:
+            app_id, secret = load_credentials(root)
+            token = get_access_token(app_id, secret)
+        except (RuntimeError, SystemExit) as exc:
+            log(root, f"取 QQ access_token 失败，本轮消息未发送: {exc}", "ERROR")
+            return finish(
+                RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="token-failed")
+            )
+
+        sent = 0
+        for index, part in enumerate(pending, 1):
+            try:
+                send(part, cfg, token)
+                sent += 1
+                emit({"kind": "sent", "index": index, "total": len(pending), "chars": len(part)})
+                log(root, f"已推送 {len(part)} 字")
+            except RuntimeError as exc:
+                log(root, f"推送失败: {exc}", "ERROR")
+            time.sleep(1.2)  # 单关系限速 20 条/分钟，留足余量
+        log(root, f"本轮结束：{len(run_repos)} 个仓库，{failures} 个失败，推送 {sent}/{len(pending)} 条")
+        return finish(
+            RoundReport(repos=len(run_repos), parts=pending, sent=sent, failures=failures)
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -543,69 +687,14 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve() if args.root else HERE
     root.mkdir(parents=True, exist_ok=True)
     cfg = load_config(root, Path(args.config).resolve() if args.config else None)
-    repos = args.repo or cfg["repos"]
-    if not repos:
-        log(root, f"配置里没有仓库清单（{cfg['_config_path']} 的 repos）", "ERROR")
-        return 2
-
-    with Lock(root, cfg["lock_stale_sec"]) as acquired:
-        if not acquired:
-            log(root, "上一轮仍在运行（.lock 未过期），本轮跳过")
-            return 0
-        state = load_state(root)
-        pending: list[str] = []
-        failures = 0
-        for slug in repos:
-            try:
-                pending.extend(check_repo(root, slug, state, cfg, args.dry_run))
-            except GitError as exc:
-                failures += 1
-                entry = state["repos"].setdefault(slug, {"refs": {}, "fail_count": 0, "fail_alerted": False})
-                entry["fail_count"] = int(entry.get("fail_count", 0)) + 1
-                log(root, f"{slug}: 检查失败（连续 {entry['fail_count']} 次）: {exc}", "ERROR")
-                if entry["fail_count"] >= cfg["fail_alert_threshold"] and not entry.get("fail_alerted"):
-                    entry["fail_alerted"] = True
-                    pending.append(
-                        f"[refwatch] {slug} 已连续 {entry['fail_count']} 次抓取失败，最后一次错误：\n{exc}\n"
-                        f"（修复后会自动恢复，不会再重复提醒）"
-                    )
-            finally:
-                if not args.dry_run:  # dry-run 只是预览，不能推进状态，否则真跑时就不报了
-                    save_state(root, state)
-
-        if args.dry_run or args.no_notify or not cfg.get("notify", True):
-            if pending and (args.dry_run):
-                for part in pending:
-                    say(f"\n===== DRY-RUN 通知 =====\n{part}")
-            log(root, f"本轮结束：{len(repos)} 个仓库，{failures} 个失败，{len(pending)} 条待发（未发送）")
-            return 0
-
-        if not pending:
-            log(root, f"本轮结束：{len(repos)} 个仓库，无变化")
-            return 0
-
-        if not cfg["openid"]:
-            log(root, "配置里没有 openid（或环境变量 QQBOT_OPENID），本轮消息未发送", "ERROR")
-            return 1
-
-        try:
-            app_id, secret = load_credentials(root)
-            token = get_access_token(app_id, secret)
-        except (RuntimeError, SystemExit) as exc:
-            log(root, f"取 QQ access_token 失败，本轮消息未发送: {exc}", "ERROR")
-            return 1
-
-        sent = 0
-        for part in pending:
-            try:
-                deliver(part, cfg, token)
-                sent += 1
-                log(root, f"已推送 {len(part)} 字")
-            except RuntimeError as exc:
-                log(root, f"推送失败: {exc}", "ERROR")
-            time.sleep(1.2)  # 单关系限速 20 条/分钟，留足余量
-        log(root, f"本轮结束：{len(repos)} 个仓库，{failures} 个失败，推送 {sent}/{len(pending)} 条")
-        return 0
+    report = run_round(
+        root,
+        cfg,
+        args.repo or cfg["repos"],
+        dry_run=args.dry_run,
+        no_notify=args.no_notify,
+    )
+    return report.exit_code
 
 
 def _root_from_argv() -> Path:

@@ -1,0 +1,110 @@
+name: build
+
+# 只在打 tag（或手动触发）时构建：普通提交由 ci.yml 的零依赖矩阵把关。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write  # 没有这一行，action-gh-release 创建 Release 会 403
+
+jobs:
+  windows-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: install build deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-gui.txt -r requirements-dev.txt nuitka
+
+      - name: lint + full test suite
+        # 这里装了 GUI 依赖，所以托盘契约测试（菜单参数个数、单实例、脱敏）会真正执行。
+        run: |
+          python -m ruff check .
+          python -X utf8 -m unittest discover -s tests
+
+      - name: icon assets are in sync with the generator
+        run: python -X utf8 tools/make_icon.py --check
+
+      - name: compute version numbers
+        id: ver
+        shell: pwsh
+        run: |
+          $raw = "${{ github.ref_name }}"
+          if (-not $raw) { $raw = "0.0.0-dev" }
+          $name = $raw -replace '^v', ''
+          # --file-version 只认数字点分格式（A.B.C[.D]），所以另算一份。
+          $parts = @(($name -replace '[^0-9.]', '') -split '\.' | Where-Object { $_ -ne '' })
+          while ($parts.Count -lt 3) { $parts += '0' }
+          if ($parts.Count -gt 4) { $parts = $parts[0..3] }
+          $numeric = $parts -join '.'
+          "name=$name" >> $env:GITHUB_OUTPUT
+          "numeric=$numeric" >> $env:GITHUB_OUTPUT
+          Write-Host "tag=$raw name=$name numeric=$numeric"
+
+      - name: build standalone exe
+        shell: pwsh
+        run: |
+          python -m nuitka `
+            --assume-yes-for-downloads `
+            --standalone `
+            --enable-plugin=tk-inter `
+            --windows-console-mode=disable `
+            --windows-icon-from-ico=assets/refwatch.ico `
+            --include-data-files=assets/refwatch.ico=assets/refwatch.ico `
+            --include-data-files=assets/refwatch.png=assets/refwatch.png `
+            --output-dir=build `
+            --output-filename=refwatch.exe `
+            --product-name=refwatch `
+            --file-version=${{ steps.ver.outputs.numeric }} `
+            --product-version=${{ steps.ver.outputs.numeric }} `
+            --company-name=refwatch `
+            --file-description="refwatch tray app" `
+            tray.py
+
+      - name: smoke test the exe
+        # 唯一能证明「打包没漏模块」的检查：--one-round 会加载 pystray._win32 / PIL /
+        # six / tkinter，缺任何一个都会以非预期退出码失败（详情见 docs/adr/0007）。
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:TEMP ("refwatch-smoke-" + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Force $root | Out-Null
+          Set-Content -Path (Join-Path $root 'config.json') -Value '{"repos": []}' -Encoding utf8
+          $proc = Start-Process -FilePath "build\tray.dist\refwatch.exe" `
+            -ArgumentList @('--one-round', '--dry-run', '--root', $root) -Wait -PassThru
+          Write-Host "exit code: $($proc.ExitCode)"
+          Write-Host "--- log ---"
+          Get-Content (Join-Path $root 'logs\watch-*.log') -ErrorAction SilentlyContinue
+          # 没有配置仓库 = 配置问题 = 2；1 意味着启动/打包出了错。
+          if ($proc.ExitCode -ne 2) { throw "exe 冒烟失败，退出码 $($proc.ExitCode)" }
+
+      - name: build installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path ${env:ProgramFiles(x86)} "Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "iscc" }
+          & $iscc "/DAPP_VERSION=${{ steps.ver.outputs.name }}" installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc 失败" }
+
+      - name: zip the portable build
+        shell: pwsh
+        run: |
+          # windows runner 上没有 Unix 的 zip，用 Compress-Archive。
+          Compress-Archive -Path "build\tray.dist\*" `
+            -DestinationPath "build\refwatch-${{ steps.ver.outputs.name }}-win64.zip" -Force
+
+      - name: release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Output/refwatch-setup-${{ steps.ver.outputs.name }}.exe
+            build/refwatch-${{ steps.ver.outputs.name }}-win64.zip
+          generate_release_notes: true

@@ -40,13 +40,13 @@ class StateMachineTest(unittest.TestCase):
             self.remote.push(*refspecs)
         self.mirror = watch.ensure_mirror(self.root, SLUG, self.cfg)[0]
         git(["remote", "set-url", "origin", str(self.remote.bare)], cwd=self.mirror)
-        self.assertEqual(watch.check_repo(self.root, SLUG, self.state, self.cfg, False), [])
+        self.assertEqual(watch.check_repo(self.root, SLUG, self.state, self.cfg), [])
         refs = self.state["repos"][SLUG]["refs"]
         self.assertTrue(refs, "基线应当记录 refs")
         return refs  # type: ignore[no-any-return]
 
     def cycle(self) -> list[str]:
-        return watch.check_repo(self.root, SLUG, self.state, self.cfg, False)
+        return watch.check_repo(self.root, SLUG, self.state, self.cfg)
 
     # -- 用例 ----------------------------------------------------------
     def test_baseline_is_silent_and_records_every_ref(self) -> None:
