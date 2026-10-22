@@ -44,7 +44,10 @@ CloseApplications=no
 RestartApplications=no
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 中文语言包不在 Inno Setup 自带的那 29 个里，而 CI 装的是 stock Inno Setup ——
+; 所以它必须跟仓库走，否则 release 步骤会在这一行 Compile aborted。
+; 文件来自官方仓库 jrsoftware/issrc 的 Files/Languages/ChineseSimplified.isl（6.5.0+）。
+Name: "chinesesimplified"; MessagesFile: "Languages\ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]

@@ -34,3 +34,18 @@ CI 里编两次、发两个 exe、文档解释两遍差异；而计划任务与�
   release 步骤要 `permissions: contents: write`。
 - 唯一能证明「包没漏模块」的检查是跑 exe：`refwatch.exe --one-round --dry-run --root <tmp>`
   期望退出码 2（没有配置仓库）。那是导入期错误码 1 与正常路径的分界。
+- **构建的 Python 锁在 3.13**，因为 3.13 的 Windows 构建还带磁盘上的 `tcl\tcl8.6`，
+  Nuitka 的 tk-inter 插件直接就能找到。3.14 换成了 Tcl 9，有两种布局，都不是开箱可用：
+  - 官方 exe 安装器：`tcl\libtcl9.0.4.zip` + `tk9.0\`。插件 4.2.2 起认识这种布局
+    （上游 issue Nuitka#3993 修的就是它），但 4.2.2 之前一律 `FATAL: tk-inter: Could not find Tcl`。
+  - `pythoncore`（`py install` / nuget 形态）：连 `tcl\` 目录都没有，脚本库压在 `tcl90.dll`
+    里的 zipfs 中（`tk.call('info','library')` → `//zipfs:/lib/tcl/tcl_library`），
+    插件和 `--tcl-library-dir` 都无处可指。要本地打包得让 Tcl 自己把库 dump 到磁盘
+    （`file copy` 递归 `$tcl_library`/`$tk_library`），再传 `--tcl-library-dir`/`--tk-library-dir`；
+    实测 dump 出 839 + 90 个文件，与上游 issue 里解压官方 zip 得到的数量一致，可以编过。
+- MSVC 不是障碍：机器上有 VS 的 C++ 生成工具就够了（实测 VS 2026 / `cl` 14.5 编过 101 个 C 文件），
+  Nuitka 自己会找，不要加 `--mingw64`（Python 3.13+ 下它直接被拒）。
+- **中文语言包必须跟仓库走**：stock Inno Setup 只带 29 个 `.isl`，`ChineseSimplified.isl` 不在其中
+  （也不在语言包目录里），写 `compiler:Languages\ChineseSimplified.isl` 会在 release 步骤
+  `Compile aborted`。文件 vendor 自官方仓库 `jrsoftware/issrc` 的 `Files/Languages/`（6.5.0+），
+  引用为 `Languages\ChineseSimplified.isl`（相对 `.iss` 所在目录）。
