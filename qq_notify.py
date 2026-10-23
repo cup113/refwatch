@@ -33,6 +33,10 @@ API_BASE = os.environ.get("QQBOT_API_BASE", "https://api.bot.qq.com").rstrip("/"
 TEXT_LIMIT = 4500
 TIMEOUT = 20
 
+# read_credentials 的 source 值之一：凭据来自环境变量（另一个可能值是命中的文件路径）。
+# 面板显示时把它翻成当前语言的文案；文件路径是数据，原样显示。
+ENV_SOURCE = "env"
+
 
 def env_file_candidates(root: Path | None = None) -> list[Path]:
     """按优先级列出可能的 .env：显式指定 > root > 旧 DSH 位置。"""
@@ -66,12 +70,13 @@ def _read_env_file(path: Path) -> dict[str, str]:
 def read_credentials(root: Path | None = None) -> dict[str, str]:
     """按优先级读出凭据，缺了也不抛 —— 设置面板要能显示「现在用的是哪一份」。
 
-    返回 {"appid", "secret", "source"}；source 是命中的位置（"环境变量" 或文件路径），
-    空串表示两样都没找到。真正发送时仍然用 load_credentials()，那里才不会静默放过缺失。
+    返回 {"appid", "secret", "source"}；source 是命中的位置（ENV_SOURCE 常量
+    "env" 或文件路径），空串表示两样都没找到。真正发送时仍然用 load_credentials()，
+    那里才不会静默放过缺失。
     """
     app_id = os.environ.get("QQBOT_APPID", "")
     secret = os.environ.get("QQBOT_SECRET", "")
-    source = "环境变量" if app_id and secret else ""
+    source = ENV_SOURCE if app_id and secret else ""
     if not app_id or not secret:
         for path in env_file_candidates(root):
             values = _read_env_file(path)
@@ -88,7 +93,10 @@ def load_credentials(root: Path | None = None) -> tuple[str, str]:
     app_id, secret = found["appid"], found["secret"]
     if not app_id or not secret:
         tried = ", ".join(str(p) for p in env_file_candidates(root))
-        raise SystemExit(f"缺少凭据：QQBOT_APPID / QQBOT_SECRET 既不在环境变量，也不在 {tried}")
+        # 英文中性诊断串：watch 的捕获点负责加当前语言的前缀（issue #2 的分工）。
+        raise SystemExit(
+            f"missing credentials: QQBOT_APPID / QQBOT_SECRET not in environment variables or {tried}"
+        )
     return app_id, secret
 
 
@@ -111,7 +119,7 @@ def get_access_token(app_id: str, secret: str) -> str:
     data = _post(TOKEN_URL, {"appId": app_id, "clientSecret": secret})
     token = data.get("access_token")
     if not token:
-        raise RuntimeError(f"获取 access_token 失败: {data}")
+        raise RuntimeError(f"access_token request failed: {data}")
     return str(token)
 
 
@@ -124,7 +132,7 @@ def send_text(openid: str, content: str, token: str) -> dict:
         {"Authorization": f"QQBot {token}"},
     )
     if not data.get("id"):
-        raise RuntimeError(f"发送失败: {data}")
+        raise RuntimeError(f"send failed: {data}")
     return data
 
 

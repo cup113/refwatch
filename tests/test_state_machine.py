@@ -119,6 +119,22 @@ class StateMachineTest(unittest.TestCase):
         self.assertEqual(len(parts), 1)
         self.assertIn("标签被移动: v1", parts[0])
 
+    def test_english_digest_covers_the_same_events(self) -> None:
+        """language=en：同一状态机吐英文摘要，结构（链接/SHA）不变。"""
+        self.first_commit()
+        self.baseline()
+        self.remote.commit("second")
+        self.remote.push("HEAD:refs/heads/main")
+        self.remote.branch("feature")
+        self.remote.push("feature")
+        self.cfg["language"] = "en"
+        parts = self.cycle()
+        self.assertEqual(len(parts), 1)
+        self.assertIn("[acme/widget] 2 refs updated", parts[0])
+        self.assertIn("1 new commit", parts[0])
+        self.assertIn("new branch: feature", parts[0])
+        self.assertIn("compare: https://github.com/acme/widget/compare/", parts[0])
+
     def test_fetch_failure_raises_git_error(self) -> None:
         self.first_commit()
         self.baseline()

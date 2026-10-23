@@ -31,6 +31,7 @@ class FormRoundTripTest(unittest.TestCase):
             "openid": " oid ",
             "notify": True,
             "autostart": False,
+            "language": "en",
             "exclude_ref_patterns": ["refs/heads/ci/*", "  "],
             "git_ssl_backend": "openssl",
             "interval_minutes": "15",
@@ -47,8 +48,17 @@ class FormRoundTripTest(unittest.TestCase):
         self.assertEqual(values["interval_minutes"], 15)
         self.assertEqual(values["max_commits_per_ref"], 10)
         self.assertIs(values["autostart"], False)
+        self.assertEqual(values["language"], "en")
         self.assertEqual(values["exclude_ref_patterns"], ["refs/heads/ci/*", "  "], "空行交给 validate 过滤")
         self.assertEqual(values["git_ssl_backend"], "openssl")
+
+    def test_language_round_trips_and_invalid_falls_back(self) -> None:
+        form = panel.form_from_config(self.cfg(language="en"))
+        self.assertEqual(form["language"], "en")
+        self.assertEqual(panel.config_from_form(form)["language"], "en")
+        self.assertEqual(
+            panel.config_from_form({"language": "klingon"})["language"], "zh", "非法语言回退 zh"
+        )
 
     def test_config_to_form_then_back_is_stable(self) -> None:
         cfg = self.cfg(interval_minutes=7, notify=False, autostart=True)
@@ -148,6 +158,14 @@ class ReportTextTest(unittest.TestCase):
 
     def test_preview_of_empty_round_is_explicit(self) -> None:
         self.assertIn("没有要发送", panel.preview_text(self.report()))
+
+    def test_report_and_preview_follow_the_language(self) -> None:
+        report = self.report(repos=2, sent=1, parts=["甲"])
+        self.assertIn("done", panel.format_report(report, lang="en"))
+        self.assertIn("2 repos", panel.format_report(report, lang="en"))
+        self.assertIn("sent 1", panel.format_report(report, lang="en"))
+        self.assertIn("part 1", panel.preview_text(report, lang="en"))
+        self.assertIn("nothing to send", panel.preview_text(self.report(), lang="en"))
 
 
 if __name__ == "__main__":

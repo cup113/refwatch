@@ -106,6 +106,7 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 | `fail_alert_threshold` | `3` | 连续失败多少次后发一条告警 |
 | `lock_stale_sec` | `1800` | 超过这个时长的锁视为残留 |
 | `git_ssl_backend` | `"openssl"` | 仅 Windows；置空则不注入 `-c http.sslBackend=` |
+| `language` | `"zh"` | 全部运行时文案的语言（摘要/日志/托盘/面板）；非法值回退 `zh` |
 | `interval_minutes` | `30` | 托盘的调度周期（`install.ps1 -Minutes` 也写它） |
 | `autostart` | `true` | 登录时自启；托盘以它为准校正 `HKCU\...\Run` |
 | `task_prompt_done` | `false` | 书签：旧计划任务已经问过了 |
@@ -127,9 +128,16 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 | 暂停调度 | 只停自动调度，手动一轮仍可用；重启即恢复 |
 | 退出 | 停调度、关图标 |
 
+菜单与面板文案跟随 `language`（上表菜单名是 `zh` 默认值）：面板里保存语言后，
+菜单立即按新语言重画，面板按新语言重建；摘要与日志从下一轮起换语言。
+
 设置面板四页：[仓库](docs/screenshots/panel-repos.png) ·
 [通知](docs/screenshots/panel-notify.png) · [调度](docs/screenshots/panel-schedule.png) ·
 [高级](docs/screenshots/panel-advanced.png) · [日志抽屉](docs/screenshots/panel-log.png)
+
+同样五页的英文界面：[Repositories](docs/screenshots/panel-repos-en.png) ·
+[Notifications](docs/screenshots/panel-notify-en.png) · [Schedule](docs/screenshots/panel-schedule-en.png) ·
+[Advanced](docs/screenshots/panel-advanced-en.png) · [Log](docs/screenshots/panel-log-en.png)
 
 几个行为上的保证：
 
@@ -203,6 +211,7 @@ python -m pip install -r requirements-gui.txt  # 只有要跑托盘/打包才需
 |---|---|
 | `watch.py` | 引擎 + CLI：`run_round()` 是「一轮」的唯一实现 |
 | `qq_notify.py` | QQ API + 凭据读取，可单独当命令行工具用 |
+| `i18n.py` | 两语言文案表 + `t()`：全部运行时字符串的唯一来源 |
 | `settings.py` | `config.json` / `.env` / 自启注册表的读写校验（无 GUI 依赖） |
 | `scheduler.py` | 按 `interval_minutes` 触发一轮 |
 | `panel.py` | tkinter 设置面板（上半部分是纯逻辑，可测） |

@@ -23,6 +23,7 @@ sys.path.insert(0, str(HERE))
 
 import qq_notify  # noqa: E402
 import watch  # noqa: E402
+from i18n import normalize_language, t  # noqa: E402
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "refwatch"
@@ -40,8 +41,6 @@ _REPO_PREFIXES = (
     "ssh://git@github.com/",
     "github.com/",
 )
-
-_CONFLICT_HINT = "（该值应导出为 .env，不是 config.json 的键）"
 
 
 # ---------------------------------------------------------------- 位置
@@ -106,7 +105,8 @@ def read_raw(path: Path) -> dict:
         return {}
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError(f"{path} 的内容不是 JSON 对象")
+        # 英文中性诊断串（同 qq_notify 的约定）：它只出现在异常/日志里，人话前缀由调用方给。
+        raise ValueError(f"{path} is not a JSON object")
     return data
 
 
@@ -185,33 +185,35 @@ def normalize_repos(values: object) -> list[str]:
     return out
 
 
-def _as_int(values: dict, key: str, low: int, high: int, errors: list[str]) -> None:
+def _as_int(values: dict, key: str, low: int, high: int, errors: list[str], lang: str) -> None:
     if key not in values:  # 缺省 = 沿用默认值，不是错误
         return
     raw = values.get(key)
     try:
         number = int(raw)  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        errors.append(f"{key} 必须是整数")
+        errors.append(t(lang, "validate.int", key=key))
         return
     if not low <= number <= high:
-        errors.append(f"{key} 必须在 {low}..{high} 之间（现在是 {number}）")
+        errors.append(t(lang, "validate.int_range", key=key, low=low, high=high, value=number))
     else:
         values[key] = number
 
 
-def validate(values: dict) -> list[str]:
-    """返回中文错误清单；空清单表示可以落盘。顺手把能规范化的值就地改好。
+def validate(values: dict, lang: str = "zh") -> list[str]:
+    """返回错误清单（按 lang 给文案）；空清单表示可以落盘。顺手把能规范化的值就地改好。
 
     只检查「传进来的键」：缺省的键沿用 DEFAULT_CONFIG，不该因此报错。
+    lang 由调用方给：面板传表单里新选的语言 —— 正在切语言的人用目标语言看报错。
     """
+    lang = normalize_language(lang)
     errors: list[str] = []
 
     if "repos" in values:
         repos = normalize_repos(values.get("repos", []))
         for slug in repos:
             if not REPO_PATTERN.match(slug):
-                errors.append(f"仓库名不合法：{slug}（要 owner/name）")
+                errors.append(t(lang, "validate.bad_slug", slug=slug))
         values["repos"] = repos
 
     if "exclude_ref_patterns" in values:
@@ -219,39 +221,46 @@ def validate(values: dict) -> list[str]:
         if isinstance(patterns, str):
             patterns = patterns.splitlines()
         if not isinstance(patterns, (list, tuple)):
-            errors.append("exclude_ref_patterns 必须是字符串列表")
+            errors.append(t(lang, "validate.patterns_type"))
             patterns = []
         values["exclude_ref_patterns"] = [str(item).strip() for item in patterns if str(item).strip()]
 
-    _as_int(values, "interval_minutes", 1, 1440, errors)
-    _as_int(values, "max_commits_per_ref", 1, 1000, errors)
-    _as_int(values, "max_chunks_per_repo", 1, 100, errors)
-    _as_int(values, "chunk_limit", 1, 100000, errors)
-    _as_int(values, "fetch_timeout_sec", 1, 86400, errors)
-    _as_int(values, "fail_alert_threshold", 1, 1000, errors)
-    _as_int(values, "lock_stale_sec", 1, 86400, errors)
+    _as_int(values, "interval_minutes", 1, 1440, errors, lang)
+    _as_int(values, "max_commits_per_ref", 1, 1000, errors, lang)
+    _as_int(values, "max_chunks_per_repo", 1, 100, errors, lang)
+    _as_int(values, "chunk_limit", 1, 100000, errors, lang)
+    _as_int(values, "fetch_timeout_sec", 1, 86400, errors, lang)
+    _as_int(values, "fail_alert_threshold", 1, 1000, errors, lang)
+    _as_int(values, "lock_stale_sec", 1, 86400, errors, lang)
 
     if "git_ssl_backend" in values:
         backend = str(values.get("git_ssl_backend", "") or "")
         if backend not in ("", "openssl", "schannel"):
-            errors.append("git_ssl_backend 只能是 openssl / schannel / 空")
+            errors.append(t(lang, "validate.backend"))
         else:
             values["git_ssl_backend"] = backend
 
+    if "language" in values:
+        language = values.get("language")
+        if not isinstance(language, str) or language not in ("zh", "en"):
+            errors.append(t(lang, "validate.language"))
+        else:
+            values["language"] = language
+
     for key in ("notify", "autostart", "task_prompt_done"):
         if key in values and not isinstance(values[key], bool):
-            errors.append(f"{key} 必须是 true/false")
+            errors.append(t(lang, "validate.bool", key=key))
 
     if "openid" in values:
         openid = values.get("openid", "")
         if not isinstance(openid, str):
-            errors.append("openid 必须是字符串")
+            errors.append(t(lang, "validate.openid_type"))
         else:
             values["openid"] = openid.strip()
 
     for key in ENV_KEYS:
         if key in values:  # 常见误操作：把密钥写进 config.json
-            errors.append(f"{key}{_CONFLICT_HINT}")
+            errors.append(t(lang, "validate.secret_conflict", key=key))
     return errors
 
 

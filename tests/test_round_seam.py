@@ -147,6 +147,14 @@ class RoundSeamTest(unittest.TestCase):
         self.assertEqual(report.failures, 1)
         self.assertEqual(report.exit_code, 0, "抓取失败不是退出码错误，只有发不出去才是")
 
+    def test_log_lines_follow_the_language_config(self) -> None:
+        """language=en 时日志行整个换语言 —— 不只摘要，日志也在「全中文或全英文」里。"""
+        watch.run_round(self.root, make_cfg(self.root, repos=[], language="en"))
+        logdir = self.root / "logs"
+        content = "\n".join(path.read_text(encoding="utf-8") for path in logdir.glob("watch-*.log"))
+        self.assertIn("no repository list in config", content)
+        self.assertNotIn("配置里没有仓库清单", content)
+
 
 @unittest.skipUnless(shutil.which("git"), "需要 git")
 class RoundSeamRealRepoTest(unittest.TestCase):

@@ -69,6 +69,24 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(watch._git_opts(cfg), want if os.name == "nt" else [])
         self.assertEqual(watch._git_opts({"git_ssl_backend": ""}), [])
 
+    def test_language_defaults_to_zh(self) -> None:
+        cfg = watch.load_config(self.root, None)
+        self.assertEqual(cfg["language"], "zh")
+
+    def test_invalid_language_falls_back_with_a_warning(self) -> None:
+        self.write("config.json", repos=["a/b"], language="fr")
+        cfg = watch.load_config(self.root, None)
+        self.assertEqual(cfg["language"], "zh", "非法值回退 zh，不炸")
+        logs = list((self.root / "logs").glob("watch-*.log"))
+        content = "\n".join(path.read_text(encoding="utf-8") for path in logs)
+        self.assertIn("[WARN]", content)
+        self.assertIn("fr", content)
+
+    def test_valid_language_passes_through(self) -> None:
+        self.write("config.json", repos=["a/b"], language="en")
+        cfg = watch.load_config(self.root, None)
+        self.assertEqual(cfg["language"], "en")
+
 
 if __name__ == "__main__":
     unittest.main()

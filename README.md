@@ -110,6 +110,7 @@ busy repositories). Rationale: [ADR-0001](docs/adr/0001-state-is-ref-to-sha.md),
 | `fail_alert_threshold` | `3` | consecutive failures before one alert |
 | `lock_stale_sec` | `1800` | a lock older than this is abandoned |
 | `git_ssl_backend` | `"openssl"` | Windows only; `""` disables the injection |
+| `language` | `"zh"` | language of all runtime text (digest, logs, tray, panel); invalid falls back to `zh` |
 | `interval_minutes` | `30` | the tray's schedule (`install.ps1 -Minutes` writes it too) |
 | `autostart` | `true` | start at login; the tray reconciles `HKCU\...\Run` to it |
 | `task_prompt_done` | `false` | bookmark: the old scheduled task has been asked about |
@@ -131,9 +132,17 @@ Right-click the icon:
 | 暂停调度 | stops automatic scheduling only; manual rounds still work (resets on restart) |
 | 退出 | stop the scheduler, remove the icon |
 
+The menu and panel follow `language` (the Chinese item names above are the `zh` default):
+saving a new language redraws the menu immediately and rebuilds the panel in it; digests
+and log lines switch from the next round on.
+
 Panel tabs: [repositories](docs/screenshots/panel-repos.png) ·
 [notifications](docs/screenshots/panel-notify.png) · [schedule](docs/screenshots/panel-schedule.png) ·
 [advanced](docs/screenshots/panel-advanced.png) · [log drawer](docs/screenshots/panel-log.png)
+
+The same five tabs in English: [repositories](docs/screenshots/panel-repos-en.png) ·
+[notifications](docs/screenshots/panel-notify-en.png) · [schedule](docs/screenshots/panel-schedule-en.png) ·
+[advanced](docs/screenshots/panel-advanced-en.png) · [log](docs/screenshots/panel-log-en.png)
 
 Guarantees worth knowing:
 
@@ -212,6 +221,7 @@ The suite is offline: throwaway repositories under the system temp dir (override
 |---|---|
 | `watch.py` | engine + CLI; `run_round()` is the only implementation of a round |
 | `qq_notify.py` | QQ API + credential lookup, usable standalone |
+| `i18n.py` | the two-language string table + `t()`: single source of all runtime text |
 | `settings.py` | `config.json` / `.env` / autostart registry reads and writes (no GUI imports) |
 | `scheduler.py` | fires a round every `interval_minutes` |
 | `panel.py` | tkinter settings panel (top half is pure, testable logic) |

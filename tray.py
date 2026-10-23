@@ -46,6 +46,7 @@ import panel  # noqa: E402
 import scheduler as scheduler_module  # noqa: E402
 import settings  # noqa: E402
 import watch  # noqa: E402
+from i18n import normalize_language, t  # noqa: E402
 
 MUTEX_NAME = "Local\\refwatch-tray"
 TASK_NAME = "refwatch"
@@ -98,13 +99,13 @@ def redact(text: str) -> str:
     return _SECRET_LINE.sub(lambda match: f"{match.group('key')}{match.group('sep')}***", text)
 
 
-def write_crash_log(root: Path, text: str) -> Path | None:
+def write_crash_log(root: Path, text: str, lang: str = "zh") -> Path | None:
     try:
         logdir = Path(root) / "logs"
         logdir.mkdir(parents=True, exist_ok=True)
         path = logdir / "crash.log"
         with path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} 未捕获异常\n{redact(text)}\n")
+            handle.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} {t(lang, 'log.uncaught')}\n{redact(text)}\n")
         return path
     except OSError:
         return None
@@ -165,23 +166,23 @@ class SingleInstance:
 # ---------------------------------------------------------------- 事件文案
 
 
-def format_event(event: dict) -> str:
+def format_event(event: dict, lang: str = "zh") -> str:
     """把 on_event 的载荷变成面板日志抽屉里的一行。"""
     stamp = f"{datetime.now():%H:%M:%S}"
     kind = event.get("kind")
     if kind == "round-start":
-        suffix = "，预览" if event.get("dry_run") else ""
-        return f"{stamp} 开始一轮（{event.get('repos')} 个仓库{suffix}）"
+        suffix = t(lang, "event.round_start_suffix") if event.get("dry_run") else ""
+        return t(lang, "event.round_start", stamp=stamp, repos=event.get("repos"), suffix=suffix)
     if kind == "repo-start":
-        return f"{stamp} {event.get('repo')} 检查中…"
+        return t(lang, "event.repo_start", stamp=stamp, repo=event.get("repo"))
     if kind == "repo-done":
-        return f"{stamp} {event.get('repo')} 完成（{event.get('parts')} 条消息）"
+        return t(lang, "event.repo_done", stamp=stamp, repo=event.get("repo"), parts=event.get("parts"))
     if kind == "repo-error":
-        return f"{stamp} {event.get('repo')} 失败：{event.get('error')}"
+        return t(lang, "event.repo_error", stamp=stamp, repo=event.get("repo"), error=event.get("error"))
     if kind == "sent":
-        return f"{stamp} 已推送 {event.get('index')}/{event.get('total')}（{event.get('chars')} 字）"
+        return t(lang, "event.sent", stamp=stamp, index=event.get("index"), total=event.get("total"), chars=event.get("chars"))
     if kind == "round-done":
-        return f"{stamp} 一轮结束：{event.get('status')}"
+        return t(lang, "event.round_done", stamp=stamp, status=event.get("status"))
     return f"{stamp} {kind}"
 
 
@@ -248,6 +249,15 @@ class App:
         """把回调丢到 Tk 线程执行（pystray 的菜单回调在它自己的线程里）。"""
         self._dialogs.put(callback)
 
+    @property
+    def lang(self) -> str:
+        """当前文案语言。cfg 每轮重读，所以语言保存后下一次求值就换文案。"""
+        return normalize_language(self.cfg.get("language"))
+
+    def _label(self, key: str) -> Callable[[object], str]:
+        """菜单标签：pystray 允许 text 是 callable（每次重画求值），语言因此能热切换。"""
+        return lambda _item: t(self.lang, key)
+
     def _pump(self) -> None:
         try:
             while True:
@@ -263,35 +273,38 @@ class App:
     # -- 菜单 ----------------------------------------------------------
     def build_menu(self) -> Menu:
         """构造菜单。回调参数个数是硬契约：text/checked 收 MenuItem（1 参），
-        action 收 (icon, item)（2 参）—— 多了 pystray 会在构造期就抛 ValueError。"""
+        action 收 (icon, item)（2 参）—— 多了 pystray 会在构造期就抛 ValueError。
+        标签全部走 _label（callable）：update_menu 重画时按当前语言重新求值。"""
         return Menu(
             MenuItem(self._status_text, None, enabled=False),
             MenuItem(self._next_text, None, enabled=False),
             Menu.SEPARATOR,
-            MenuItem("立即运行一轮", self._on_run_now),
-            MenuItem("预览（不发送）", self._on_preview),
-            MenuItem("打开设置…", self._on_open_panel, default=True),
+            MenuItem(self._label("tray.menu_run_now"), self._on_run_now),
+            MenuItem(self._label("tray.menu_preview"), self._on_preview),
+            MenuItem(self._label("tray.menu_settings"), self._on_open_panel, default=True),
             Menu.SEPARATOR,
-            MenuItem("打开日志", self._on_open_logs),
-            MenuItem("打开数据目录", self._on_open_data),
-            MenuItem("开机自启", self._on_toggle_autostart, checked=self._autostart_checked),
-            MenuItem("暂停调度", self._on_toggle_paused, checked=self._paused_checked),
+            MenuItem(self._label("tray.menu_logs"), self._on_open_logs),
+            MenuItem(self._label("tray.menu_data"), self._on_open_data),
+            MenuItem(self._label("tray.menu_autostart"), self._on_toggle_autostart, checked=self._autostart_checked),
+            MenuItem(self._label("tray.menu_pause"), self._on_toggle_paused, checked=self._paused_checked),
             Menu.SEPARATOR,
-            MenuItem("退出", self._on_quit),
+            MenuItem(self._label("tray.menu_quit"), self._on_quit),
         )
 
     def _status_text(self, _item: object) -> str:
         if self.scheduler.running:
-            return "状态：运行中…"
+            return t(self.lang, "tray.status_running")
         if self.scheduler.paused:
-            return "状态：已暂停"
-        return "状态：正常"
+            return t(self.lang, "tray.status_paused")
+        return t(self.lang, "tray.status_ok")
 
     def _next_text(self, _item: object) -> str:
         if self.scheduler.paused:
-            return "下次运行：已暂停"
+            return t(self.lang, "tray.next_paused")
         when = self.scheduler.next_run_at()
-        return f"下次运行：{when:%H:%M}" if when else "下次运行：——"
+        if not when:
+            return t(self.lang, "tray.next_none")
+        return t(self.lang, "tray.next_at", time=f"{when:%H:%M}")
 
     def _autostart_checked(self, _item: object) -> bool:
         return bool(self.cfg.get("autostart", True))
@@ -306,7 +319,7 @@ class App:
     # -- 动作（都跑在 pystray 线程，必须桥接） --------------------------
     def _on_run_now(self, _icon: object, _item: object) -> None:
         if not self.scheduler.trigger_now():
-            self._set_note("上一轮还没结束，先等它跑完。")
+            self._set_note(t(self.lang, "common.round_busy"))
 
     def _on_preview(self, _icon: object, _item: object) -> None:
         self.launch(dry_run=True)
@@ -327,10 +340,10 @@ class App:
     def _on_toggle_paused(self, _icon: object, _item: object) -> None:
         if self.scheduler.paused:
             self.scheduler.resume()
-            self._set_note("已恢复调度")
+            self._set_note(t(self.lang, "tray.note_resumed"))
         else:
             self.scheduler.pause()
-            self._set_note("已暂停调度（手动一轮仍可用）")
+            self._set_note(t(self.lang, "tray.note_paused"))
 
     def _on_quit(self, _icon: object, _item: object) -> None:
         self._in_tk(self.request_quit)
@@ -342,7 +355,7 @@ class App:
     def launch(self, dry_run: bool) -> bool:
         """另起线程跑一轮（预览或手动），立刻返回；已经在跑则拒绝。"""
         if self._round_guard.locked():
-            self._set_note("上一轮还没结束，先等它跑完。")
+            self._set_note(t(self.lang, "common.round_busy"))
             return False
         threading.Thread(
             target=self._guarded_round, args=(dry_run,), name="refwatch-preview", daemon=True
@@ -361,7 +374,7 @@ class App:
         try:
             cfg = settings.load(self.root, self.config_path)  # 每轮重读：面板一保存就生效
         except (OSError, ValueError) as exc:
-            self._set_note(f"配置读不出来，本轮跳过：{exc}")
+            self._set_note(t(self.lang, "tray.note_config_unreadable", error=exc))
             return
         self.cfg = cfg
         report = watch.run_round(self.root, cfg, dry_run=dry_run, on_event=self._on_event)
@@ -371,15 +384,15 @@ class App:
     def _on_event(self, event: dict) -> None:
         if not self.panel_visible():
             return
-        line = format_event(event)
+        line = format_event(event, lang=self.lang)
         self._in_tk(lambda: self._append_log(line))
 
     def _after_round(self, report) -> None:  # noqa: ANN001 - watch.RoundReport
-        self._set_note(panel.format_report(report))
+        self._set_note(panel.format_report(report, lang=self.lang))
         if self.panel_visible():
-            self._append_log(panel.format_report(report))
+            self._append_log(panel.format_report(report, lang=self.lang))
             if report.status == "dry-run":
-                self._append_log(panel.preview_text(report))
+                self._append_log(panel.preview_text(report, lang=self.lang))
 
     # -- 面板 ----------------------------------------------------------
     def panel_visible(self) -> bool:
@@ -395,6 +408,7 @@ class App:
                 on_run=self.launch,
                 get_status=self.status_line,
                 task_hint=self.task_hint,
+                lang=self.lang,
             )
         self._panel.show()
 
@@ -404,11 +418,23 @@ class App:
 
     def on_saved(self, values: dict) -> None:
         """面板保存成功（已在 Tk 线程）：把能立刻生效的东西立刻生效。"""
+        old_lang = self.lang
         self.cfg = settings.load(self.root, self.config_path)
         self.scheduler.set_interval(int(self.cfg.get("interval_minutes") or 30))
         with contextlib.suppress(OSError):
             settings.sync_autostart(bool(self.cfg.get("autostart", True)))
+        # 语言变了：面板标签建一次、菜单标签每次重画求值 —— 重建面板 + 重画菜单，
+        # 未保存的表单内容只在换语言时丢失（这是「保存即全生效」的代价）。
+        if self._panel is not None and self.lang != old_lang:
+            self._rebuild_panel()
         self._redraw_menu()
+
+    def _rebuild_panel(self) -> None:
+        if self._panel is not None:
+            with contextlib.suppress(Exception):
+                self._panel.destroy()
+            self._panel = None
+        self.open_panel()
 
     def set_autostart(self, enabled: bool) -> None:
         """菜单里的开关：注册表与 config.json 一起改（配置是真相，注册表是投影）。"""
@@ -417,23 +443,23 @@ class App:
             settings.sync_autostart(enabled)
             settings.save_config(self.config_path, {"autostart": enabled})
         except OSError as exc:
-            self._set_note(f"改开机自启失败：{exc}")
+            self._set_note(t(self.lang, "tray.note_autostart_failed", error=exc))
             return
-        self._set_note(f"开机自启：{'已开启' if enabled else '已关闭'}")
+        self._set_note(t(self.lang, "tray.note_autostart_on" if enabled else "tray.note_autostart_off"))
         self._redraw_menu()
 
     # -- 状态 ----------------------------------------------------------
     def status_line(self) -> str:
         parts: list[str] = []
         if self.scheduler.running:
-            parts.append("运行中…")
+            parts.append(t(self.lang, "tray.line_running"))
         elif self.scheduler.paused:
-            parts.append("已暂停")
+            parts.append(t(self.lang, "tray.line_paused"))
         else:
             when = self.scheduler.next_run_at()
-            parts.append(f"下次 {when:%H:%M}" if when else "未调度")
+            parts.append(t(self.lang, "tray.line_next", time=f"{when:%H:%M}") if when else t(self.lang, "tray.line_unscheduled"))
         if self._last_report is not None:
-            parts.append(panel.format_report(self._last_report))
+            parts.append(panel.format_report(self._last_report, lang=self.lang))
         if self._note:
             parts.append(self._note)
         return " · ".join(parts)
@@ -446,11 +472,8 @@ class App:
 
     def task_hint(self) -> str:
         if task_present():
-            return (
-                "检测到同名计划任务 refwatch：它和托盘会互相抢锁。\n"
-                "建议在「任务计划程序」里移除它（或删掉后重启本程序会再问一次）。"
-            )
-        return "没有检测到同名计划任务，调度由本程序负责。"
+            return t(self.lang, "tray.hint_task_found")
+        return t(self.lang, "tray.hint_task_absent")
 
     # -- 平台动作 ------------------------------------------------------
     def _open_path(self, path: Path) -> None:
@@ -460,7 +483,7 @@ class App:
         try:
             os.startfile(str(target))  # noqa: S606 - Windows 上打开资源管理器
         except OSError as exc:
-            self._set_note(f"打开 {target} 失败：{exc}")
+            self._set_note(t(self.lang, "tray.note_open_failed", target=target, error=exc))
 
     def request_quit(self) -> None:
         self.scheduler.stop(timeout=5.0)
@@ -479,14 +502,9 @@ class App:
         if self.cfg.get("task_prompt_done"):
             return
         if task_present():
-            if ask_yes_no(
-                "refwatch",
-                "检测到旧的计划任务 refwatch（每 N 分钟跑一次 watch.py）。\n\n"
-                "托盘应用已经接管调度，两者同时存在只会在 .lock 上互相跳过。\n"
-                "现在移除该计划任务吗？",
-            ):
+            if ask_yes_no("refwatch", t(self.lang, "tray.task_ask")):
                 remove_task()
-                self._set_note("已移除旧的计划任务")
+                self._set_note(t(self.lang, "tray.note_task_removed"))
         self._mark_task_prompt_done()
 
     def _mark_task_prompt_done(self) -> None:
@@ -545,6 +563,14 @@ def is_headless(rest: list[str]) -> bool:
     return any(item in headless_flags or item.startswith("--repo=") for item in rest) or "--one-round" in rest
 
 
+def startup_lang(root: Path, config_path: Path | None) -> str:
+    """App 构造之前的弹框也要讲对语言；配置读不出来时按 zh（与 load_config 同一回退）。"""
+    try:
+        return normalize_language(settings.load(root, config_path).get("language"))
+    except Exception:  # noqa: BLE001 - 启动兜底：坏配置不该让弹框都弹不出来
+        return "zh"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     root, config_path, rest = split_args(args)
@@ -558,19 +584,17 @@ def main(argv: list[str] | None = None) -> int:
             resolved = settings.resolve_config_path(root, config_path)
             return watch.main(["--root", str(root), "--config", str(resolved), *passthrough])
 
+        lang = startup_lang(root, config_path)
         if os.name != "nt":
-            print("refwatch 托盘应用只支持 Windows；无头用法请直接跑 watch.py。", file=sys.stderr)
+            print(t(lang, "tray.windows_only"), file=sys.stderr)
             return 2
         if panel.tk is None:  # pragma: no cover - 装了 Python 就有 tkinter
-            show_message("refwatch", "这台机器的 Python 没有 tkinter，无法显示托盘与设置面板。", error=True)
+            show_message("refwatch", t(lang, "tray.no_tkinter"), error=True)
             return 2
 
         instance = SingleInstance()
         if not instance.acquire():
-            show_message(
-                "refwatch",
-                "refwatch 已经在运行。\n\n图标在通知区域 —— 看不到就点任务栏的「^」展开。",
-            )
+            show_message("refwatch", t(lang, "tray.already_running"))
             return 0
         enable_dpi_awareness()  # 必须在创建 Tk 之前
         try:
@@ -582,13 +606,14 @@ def main(argv: list[str] | None = None) -> int:
     except BaseException:
         text = traceback.format_exc()
         print(text, file=sys.stderr)
-        path = write_crash_log(root, text)
+        path = write_crash_log(root, text, lang=startup_lang(root, config_path))
         if not headless:
             # 无头模式（计划任务/CI）不弹框：没人点它，只会把进程/流水线卡住。
             detail = text.strip().splitlines()[-1]
+            lang = startup_lang(root, config_path)
             show_message(
-                "refwatch 启动失败",
-                f"{detail}\n\n完整堆栈：{path}" if path else detail,
+                t(lang, "tray.start_failed_title"),
+                t(lang, "tray.start_failed_body", detail=detail, path=path) if path else detail,
                 error=True,
             )
         return 1

@@ -117,6 +117,21 @@ class MenuContractTest(unittest.TestCase):
     def test_next_run_line_is_human_readable(self) -> None:
         self.assertIn("下次运行", self.app._next_text(None))
 
+    def test_menu_labels_follow_the_language_config(self) -> None:
+        """保存语言后 update_menu 重画，标签 callable 按当前 cfg 重新求值。"""
+        self.app.cfg["language"] = "en"
+        labels = [item.text for item in self.items()]
+        self.assertIn("Run a round now", labels)
+        self.assertIn("Pause schedule", labels)
+        self.assertIn("Quit", labels)
+        self.assertIn("Status: OK", labels)
+        self.assertNotIn("退出", labels, "换语言后不该残留上一语言的标签")
+        self.app.scheduler._running = True
+        try:
+            self.assertEqual(self.app._status_text(None), "Status: running…")
+        finally:
+            self.app.scheduler._running = False
+
 
 @unittest.skipUnless(tray is not None, "需要 Windows + pystray + PIL + tkinter")
 class EventAndLogTest(unittest.TestCase):
@@ -133,6 +148,17 @@ class EventAndLogTest(unittest.TestCase):
         self.assertTrue(all(line and "\n" not in line for line in lines), lines)
         self.assertIn("预览", lines[0])
         self.assertIn("boom", lines[3])
+
+    def test_event_lines_follow_the_language(self) -> None:
+        events = [
+            {"kind": "round-start", "repos": 2, "dry_run": True},
+            {"kind": "sent", "index": 1, "total": 2, "chars": 10},
+            {"kind": "round-done", "status": "ok"},
+        ]
+        lines = [tray.format_event(event, lang="en") for event in events]
+        self.assertIn("round started (2 repos, preview)", lines[0])
+        self.assertIn("sent 1/2 (10 chars)", lines[1])
+        self.assertIn("round done: ok", lines[2])
 
     def test_unknown_event_does_not_crash(self) -> None:
         self.assertIn("mystery", tray.format_event({"kind": "mystery"}))
@@ -153,6 +179,13 @@ class EventAndLogTest(unittest.TestCase):
         content = path.read_text(encoding="utf-8")
         self.assertIn("未捕获异常", content)
         self.assertNotIn("topsecret", content)
+
+    def test_crash_log_header_follows_the_language(self) -> None:
+        root = temp_root()
+        self.addCleanup(rmtree, root)
+        path = tray.write_crash_log(root, "boom", lang="en")
+        assert path is not None
+        self.assertIn("uncaught exception", path.read_text(encoding="utf-8"))
 
     def test_tail_log_style_event_line_has_a_timestamp(self) -> None:
         self.assertRegex(tray.format_event({"kind": "round-done", "status": "ok"}), r"^\d\d:\d\d:\d\d ")

@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 # 推送器与监视器同目录（发布形态就是两个平铺文件）。
 sys.path.insert(0, str(HERE))
 
+import i18n  # noqa: E402
 from qq_notify import chunk, get_access_token, load_credentials, send_text  # noqa: E402
 
 # pythonw.exe 没有控制台，而它 spawn 的 git.exe 是控制台子系统程序：没有这个标志，
@@ -69,6 +70,8 @@ DEFAULT_CONFIG: dict = {
     "fail_alert_threshold": 3,
     "lock_stale_sec": 1800,
     "git_ssl_backend": "openssl",
+    # 全部运行时文案（摘要/日志/托盘/面板）的语言；非法值回退 zh（见 i18n.py）。
+    "language": "zh",
     # 下面三个只对托盘应用有意义；CLI 读同一个 config.json，不理会它们。
     "interval_minutes": 30,
     "autostart": True,
@@ -92,8 +95,14 @@ def load_config(root: Path, config_path: Path | None) -> dict:
     cfg = dict(DEFAULT_CONFIG)
     if path.is_file():
         cfg.update(json.loads(path.read_text(encoding="utf-8")))
-        if path.name == "watch.json" and not (path.parent / "config.json").is_file():
-            log(root, f"配置文件用的是旧名字 {path.name}，建议改名为 config.json（下个版本不再支持）", "WARN")
+    raw_language = cfg.get("language")
+    cfg["language"] = i18n.normalize_language(raw_language)
+    lang = cfg["language"]
+    if path.is_file() and path.name == "watch.json" and not (path.parent / "config.json").is_file():
+        log(root, i18n.t(lang, "log.config_legacy_name", name=path.name), "WARN")
+    if raw_language != cfg["language"]:
+        # 值本身不合法，没有「它的语言」可言：用回退后的 zh 报这条 WARN。
+        log(root, i18n.t("zh", "log.language_invalid", value=raw_language), "WARN")
     cfg["openid"] = str(cfg.get("openid") or os.environ.get("QQBOT_OPENID", ""))
     cfg["_root"] = root
     cfg["_config_path"] = path
@@ -152,7 +161,8 @@ def git(
             **_WINDOWS_SPAWN_KW,
         )
     except subprocess.TimeoutExpired as exc:
-        raise GitError(f"git {' '.join(args)} 超时 ({timeout}s)") from exc
+        lang = i18n.normalize_language((cfg or DEFAULT_CONFIG).get("language"))
+        raise GitError(i18n.t(lang, "log.git_timeout", args=" ".join(args), timeout=timeout)) from exc
     return (
         proc.returncode,
         proc.stdout.decode("utf-8", "replace"),
@@ -370,41 +380,48 @@ def fmt_commit(index: int, c: dict) -> str:
     return f"{index}. {c['sha'][:7]} {when} {c['author'][:18]} {stats}\n   {c['subject'][:100]}"
 
 
-def fmt_span(commits: list[dict]) -> str:
+def fmt_span(commits: list[dict], lang: str) -> str:
     if not commits:
         return ""
     first, last = commits[0]["when"], commits[-1]["when"]
     if first.date() == last.date():
         return ""
     days = (last.date() - first.date()).days
-    return f" 跨度 {days} 天"
+    return i18n.t(lang, "digest.span", days=days)
 
 
 def build_repo_message(slug: str, events: list[dict], cfg: dict) -> str:
+    lang = i18n.normalize_language(cfg.get("language"))
     tz = datetime.now().astimezone().strftime("%z")
-    lines = [f"[{slug}] {len(events)} 个 ref 有更新  (时间 UTC{tz})"]
+    header_key = "digest.header_one" if len(events) == 1 else "digest.header"
+    lines = [i18n.t(lang, header_key, slug=slug, count=len(events), tz=tz)]
     for ev in events:
         ref = short_ref(ev["ref"])
-        label = "分支" if kind_of(ev["ref"]) == "branch" else "tag"
+        is_tag = kind_of(ev["ref"]) == "tag"
         if ev["kind"] == "deleted":
-            lines.append(f"* {label}已删除: {ref}")
+            key = "digest.tag_deleted" if is_tag else "digest.branch_deleted"
+            lines.append(f"* {i18n.t(lang, key, ref=ref)}")
             continue
         if ev["kind"] == "new":
-            if ev["kind_label"] == "tag":
-                lines.append(f"* 新 tag: {ref}")
+            if is_tag:
+                lines.append(f"* {i18n.t(lang, 'digest.new_tag', ref=ref)}")
             else:
                 head = ev["commits"][-1] if ev["commits"] else None
                 extra = f"  ({head['sha'][:7]} {head['subject'][:60]})" if head else ""
-                lines.append(f"* 新{label}: {ref}{extra}")
+                lines.append(f"* {i18n.t(lang, 'digest.new_branch', ref=ref)}{extra}")
             if ev.get("commits"):
                 lines.extend("  " + fmt_commit(i, c) for i, c in enumerate(ev["commits"][-3:], 1))
             continue
         if ev["kind"] == "rewritten":
             head = ev["commits"][-1] if ev["commits"] else None
-            if kind_of(ev["ref"]) == "tag":
-                lines.append(f"* 标签被移动: {ref}  {ev['old'][:7]} -> {ev['new'][:7]}")
+            if is_tag:
+                lines.append(
+                    f"* {i18n.t(lang, 'digest.tag_moved', ref=ref, old=ev['old'][:7], new=ev['new'][:7])}"
+                )
             else:
-                lines.append(f"* 分支历史被改写: {ref}  {ev['old'][:7]} -> {ev['new'][:7]}")
+                lines.append(
+                    f"* {i18n.t(lang, 'digest.rewritten', ref=ref, old=ev['old'][:7], new=ev['new'][:7])}"
+                )
             if head:
                 lines.append("  " + fmt_commit(1, head))
                 lines.append(f"  https://github.com/{slug}/commit/{head['sha'][:12]}")
@@ -412,15 +429,17 @@ def build_repo_message(slug: str, events: list[dict], cfg: dict) -> str:
         # 正常新增提交
         total = ev["total"]
         shown = len(ev["commits"])
-        span = fmt_span(ev["commits"])
-        head = f"* {ref}  {total} 个新提交{span}"
-        lines.append(head)
+        span = fmt_span(ev["commits"], lang)
+        head_key = "digest.update_head_one" if total == 1 else "digest.update_head"
+        lines.append(f"* {i18n.t(lang, head_key, ref=ref, total=total, span=span)}")
         lines.extend("  " + fmt_commit(i, c) for i, c in enumerate(ev["commits"], 1))
         if total > shown:
-            lines.append(f"  ... 另有 {total - shown} 个较早提交未列出")
+            hidden_key = "digest.older_hidden_one" if total - shown == 1 else "digest.older_hidden"
+            lines.append(i18n.t(lang, hidden_key, count=total - shown))
         if ev["kind_label"] == "branch":
             lines.append(f"  compare: https://github.com/{slug}/compare/{ev['old'][:12]}..{ev['new'][:12]}")
-            lines.append(f"  最新: https://github.com/{slug}/commit/{ev['new'][:12]}")
+            latest_url = f"https://github.com/{slug}/commit/{ev['new'][:12]}"
+            lines.append(f"  {i18n.t(lang, 'digest.latest', url=latest_url)}")
         else:
             lines.append(f"  tag: https://github.com/{slug}/releases/tag/{ref}")
     return "\n".join(lines)
@@ -447,6 +466,7 @@ def check_repo(root: Path, slug: str, state: dict, cfg: dict) -> list[str]:
     只负责「看」：是否落盘 state.json、是否真的发送，都由调用方（run_round）决定 ——
     dry-run 不推进 ref 基线正是靠调用方不落盘，而不是靠这里分叉。
     """
+    lang = i18n.normalize_language(cfg.get("language"))
     mirror, fresh = ensure_mirror(root, slug, cfg)
     if fresh:
         fetch_mirror(mirror, cfg["fetch_timeout_sec"], cfg)
@@ -457,7 +477,7 @@ def check_repo(root: Path, slug: str, state: dict, cfg: dict) -> list[str]:
             "fail_count": 0,
             "fail_alerted": False,
         }
-        log(root, f"{slug}: 首次建立基线，记录 {len(refs)} 个 ref（静默，不通知）")
+        log(root, i18n.t(lang, "log.baseline_first", slug=slug, count=len(refs)))
         return []
 
     fetch_mirror(mirror, cfg["fetch_timeout_sec"], cfg)
@@ -469,7 +489,7 @@ def check_repo(root: Path, slug: str, state: dict, cfg: dict) -> list[str]:
     if not old_refs:
         known["refs"] = refs
         known["baseline_at"] = now().isoformat(timespec="seconds")
-        log(root, f"{slug}: 尚无基线，本轮静默建立（{len(refs)} 个 ref）")
+        log(root, i18n.t(lang, "log.baseline_missing", slug=slug, count=len(refs)))
         return []
 
     events: list[dict] = []
@@ -524,11 +544,11 @@ def check_repo(root: Path, slug: str, state: dict, cfg: dict) -> list[str]:
     known["fail_count"] = 0
     known["fail_alerted"] = False
     if not events:
-        log(root, f"{slug}: 无变化（{len(refs)} 个 ref）")
+        log(root, i18n.t(lang, "log.no_changes", slug=slug, count=len(refs)))
         return []
 
     message = build_repo_message(slug, events, cfg)
-    log(root, f"{slug}: {len(events)} 个 ref 有变化，消息 {len(message)} 字")
+    log(root, i18n.t(lang, "log.repo_changed", slug=slug, count=len(events), chars=len(message)))
     for ev in events:
         desc = f"{ev['kind']} {ev['ref']}"
         if ev.get("total"):
@@ -537,7 +557,7 @@ def check_repo(root: Path, slug: str, state: dict, cfg: dict) -> list[str]:
     parts = chunk(message, cfg["chunk_limit"])
     if len(parts) > cfg["max_chunks_per_repo"]:
         parts = parts[: cfg["max_chunks_per_repo"]]
-        parts[-1] += "\n...(内容过长已截断)"
+        parts[-1] += "\n" + i18n.t(lang, "digest.truncated")
     return parts
 
 
@@ -577,6 +597,7 @@ def run_round(
     dry_run 只打印不发送、**不推进 ref 基线**（不 save_state）；no_notify 推进状态但不发送。
     这是本工具唯一的「一轮」实现，CLI 与托盘都走这里。
     """
+    lang = i18n.normalize_language(cfg.get("language"))
     run_repos = list(repos if repos is not None else cfg["repos"])
     send = deliver_fn or deliver
     emit = on_event or (lambda _event: None)
@@ -586,12 +607,12 @@ def run_round(
         return report
 
     if not run_repos:
-        log(root, f"配置里没有仓库清单（{cfg.get('_config_path')} 的 repos）", "ERROR")
+        log(root, i18n.t(lang, "log.no_repos", path=cfg.get("_config_path")), "ERROR")
         return finish(RoundReport(status="no-repos"))
 
     with Lock(root, cfg["lock_stale_sec"]) as acquired:
         if not acquired:
-            log(root, "上一轮仍在运行（.lock 未过期），本轮跳过")
+            log(root, i18n.t(lang, "log.lock_busy"))
             return finish(RoundReport(repos=len(run_repos), skipped="lock"))
 
         emit({"kind": "round-start", "repos": len(run_repos), "dry_run": dry_run})
@@ -605,7 +626,7 @@ def run_round(
                 parts = check_repo(root, slug, state, cfg)
                 if dry_run:
                     for i, part in enumerate(parts, 1):
-                        say(f"\n===== DRY-RUN {slug} [{i}/{len(parts)}] ({len(part)} 字) =====\n{part}")
+                        say(i18n.t(lang, "log.dry_run_part", slug=slug, index=i, total=len(parts), chars=len(part), part=part))
                     previewed.extend(parts)
                 else:
                     pending.extend(parts)
@@ -615,13 +636,10 @@ def run_round(
                 emit({"kind": "repo-error", "repo": slug, "error": str(exc)})
                 entry = state["repos"].setdefault(slug, {"refs": {}, "fail_count": 0, "fail_alerted": False})
                 entry["fail_count"] = int(entry.get("fail_count", 0)) + 1
-                log(root, f"{slug}: 检查失败（连续 {entry['fail_count']} 次）: {exc}", "ERROR")
+                log(root, i18n.t(lang, "log.check_failed", slug=slug, count=entry["fail_count"], error=exc), "ERROR")
                 if entry["fail_count"] >= cfg["fail_alert_threshold"] and not entry.get("fail_alerted"):
                     entry["fail_alerted"] = True
-                    pending.append(
-                        f"[refwatch] {slug} 已连续 {entry['fail_count']} 次抓取失败，最后一次错误：\n{exc}\n"
-                        f"（修复后会自动恢复，不会再重复提醒）"
-                    )
+                    pending.append(i18n.t(lang, "digest.fail_alert", slug=slug, count=entry["fail_count"], error=exc))
             finally:
                 if not dry_run:  # dry-run 只是预览，不能推进状态，否则真跑时就不报了
                     save_state(root, state)
@@ -629,8 +647,8 @@ def run_round(
         if dry_run or no_notify or not cfg.get("notify", True):
             if pending and dry_run:
                 for part in pending:
-                    say(f"\n===== DRY-RUN 通知 =====\n{part}")
-            log(root, f"本轮结束：{len(run_repos)} 个仓库，{failures} 个失败，{len(pending)} 条待发（未发送）")
+                    say(i18n.t(lang, "log.dry_run_notice", part=part))
+            log(root, i18n.t(lang, "log.round_pending", repos=len(run_repos), failures=failures, pending=len(pending)))
             return finish(
                 RoundReport(
                     repos=len(run_repos),
@@ -641,11 +659,11 @@ def run_round(
             )
 
         if not pending:
-            log(root, f"本轮结束：{len(run_repos)} 个仓库，无变化")
+            log(root, i18n.t(lang, "log.round_quiet", repos=len(run_repos)))
             return finish(RoundReport(repos=len(run_repos), failures=failures))
 
         if not cfg.get("openid"):
-            log(root, "配置里没有 openid（或环境变量 QQBOT_OPENID），本轮消息未发送", "ERROR")
+            log(root, i18n.t(lang, "log.no_openid"), "ERROR")
             return finish(
                 RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="no-openid")
             )
@@ -654,7 +672,7 @@ def run_round(
             app_id, secret = load_credentials(root)
             token = get_access_token(app_id, secret)
         except (RuntimeError, SystemExit) as exc:
-            log(root, f"取 QQ access_token 失败，本轮消息未发送: {exc}", "ERROR")
+            log(root, i18n.t(lang, "log.token_failed", error=exc), "ERROR")
             return finish(
                 RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="token-failed")
             )
@@ -665,11 +683,11 @@ def run_round(
                 send(part, cfg, token)
                 sent += 1
                 emit({"kind": "sent", "index": index, "total": len(pending), "chars": len(part)})
-                log(root, f"已推送 {len(part)} 字")
+                log(root, i18n.t(lang, "log.sent_chars", chars=len(part)))
             except RuntimeError as exc:
-                log(root, f"推送失败: {exc}", "ERROR")
+                log(root, i18n.t(lang, "log.send_failed", error=exc), "ERROR")
             time.sleep(1.2)  # 单关系限速 20 条/分钟，留足余量
-        log(root, f"本轮结束：{len(run_repos)} 个仓库，{failures} 个失败，推送 {sent}/{len(pending)} 条")
+        log(root, i18n.t(lang, "log.round_done", repos=len(run_repos), failures=failures, sent=sent, total=len(pending)))
         return finish(
             RoundReport(repos=len(run_repos), parts=pending, sent=sent, failures=failures)
         )
@@ -719,10 +737,17 @@ if __name__ == "__main__":
 
         _tb = traceback.format_exc()
         try:
-            _logs = _root_from_argv() / "logs"
+            _root = _root_from_argv()
+            _logs = _root / "logs"
             _logs.mkdir(parents=True, exist_ok=True)
+            # 语言跟着配置走；连配置都读不出来时按 zh —— 这本身就是兜底路径。
+            _lang = "zh"
+            try:
+                _lang = i18n.normalize_language(load_config(_root, None).get("language"))
+            except Exception:  # noqa: BLE001 - 兜底路径里读盘失败只能回到默认
+                pass
             with (_logs / "error.log").open("a", encoding="utf-8") as fh:
-                fh.write(f"{now():%Y-%m-%d %H:%M:%S} 未捕获异常\n{_tb}\n")
+                fh.write(f"{now():%Y-%m-%d %H:%M:%S} {i18n.t(_lang, 'log.uncaught')}\n{_tb}\n")
         except OSError:
             pass
         raise SystemExit(1) from None

@@ -186,6 +186,21 @@ class ValidateTest(SettingsBase):
         settings.validate(values)
         self.assertEqual(values["openid"], "ABC")
 
+    def test_language_must_be_zh_or_en(self) -> None:
+        values = {"repos": [], "language": "fr"}
+        errors = settings.validate(values)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("zh / en", errors[0])
+        accepted = {"repos": [], "language": "en"}
+        self.assertEqual(settings.validate(accepted), [])
+        self.assertEqual(accepted["language"], "en")
+
+    def test_error_messages_follow_the_lang_argument(self) -> None:
+        errors = settings.validate({"interval_minutes": "abc"}, lang="en")
+        self.assertTrue(any("must be an integer" in message for message in errors), errors)
+        errors = settings.validate({"repos": [], "interval_minutes": "abc"})
+        self.assertTrue(any("必须是整数" in message for message in errors), errors)
+
 
 class SecretsTest(SettingsBase):
     def test_env_file_is_created_with_both_keys(self) -> None:

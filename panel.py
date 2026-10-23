@@ -21,6 +21,8 @@ from typing import Callable
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import i18n  # noqa: E402
+import qq_notify  # noqa: E402
 import settings  # noqa: E402
 import watch  # noqa: E402
 
@@ -32,27 +34,31 @@ except ImportError:  # pragma: no cover
     scrolledtext = None  # type: ignore[assignment]
     ttk = None  # type: ignore[assignment]
 
-TITLE = "refwatch 设置"
-
-# 高级页里的数字项；interval_minutes 单独放在「调度」页。
-NUMERIC_FIELDS: tuple[tuple[str, str], ...] = (
-    ("max_commits_per_ref", "每个分支最多列出多少条提交"),
-    ("max_chunks_per_repo", "每仓库每轮最多发几条"),
-    ("chunk_limit", "单条消息字数上限"),
-    ("fetch_timeout_sec", "单仓库 fetch 超时（秒）"),
-    ("fail_alert_threshold", "连续失败多少次后告警"),
-    ("lock_stale_sec", "锁残留判定（秒）"),
+# 高级页里的数字项；interval_minutes 单独放在「调度」页。标签在 i18n 表的
+# panel.field_<key>。
+NUMERIC_FIELDS: tuple[str, ...] = (
+    "max_commits_per_ref",
+    "max_chunks_per_repo",
+    "chunk_limit",
+    "fetch_timeout_sec",
+    "fail_alert_threshold",
+    "lock_stale_sec",
 )
 
 BACKENDS = ("", "openssl", "schannel")
 
-_STATUS_TEXT = {
-    "ok": "完成",
-    "dry-run": "预览完成（未发送、未推进基线）",
-    "not-sent": "完成（按设置没有发送）",
-    "no-openid": "未发送：还没填 openid",
-    "token-failed": "未发送：取 QQ access_token 失败",
-    "no-repos": "没配仓库",
+# 语言选择框显示的是人话，落盘的是代码；两个方向的映射都只有这两项。
+LANG_DISPLAY = {"zh": "中文", "en": "English"}
+LANG_CODES = {display: code for code, display in LANG_DISPLAY.items()}
+
+# RoundReport.status -> i18n key；文案在 i18n 表的 panel.status_*。
+_STATUS_KEYS = {
+    "ok": "panel.status_ok",
+    "dry-run": "panel.status_dry_run",
+    "not-sent": "panel.status_not_sent",
+    "no-openid": "panel.status_no_openid",
+    "token-failed": "panel.status_token_failed",
+    "no-repos": "panel.status_no_repos",
 }
 
 
@@ -69,10 +75,11 @@ def form_from_config(cfg: dict, secrets: dict | None = None) -> dict:
         "secret": str(found.get("secret") or ""),
         "notify": bool(cfg.get("notify", True)),
         "autostart": bool(cfg.get("autostart", True)),
+        "language": i18n.normalize_language(cfg.get("language")),
         "exclude_ref_patterns": list(cfg.get("exclude_ref_patterns") or []),
         "git_ssl_backend": str(cfg.get("git_ssl_backend", "") or ""),
     }
-    for key, _label in NUMERIC_FIELDS:
+    for key in NUMERIC_FIELDS:
         form[key] = str(cfg.get(key, watch.DEFAULT_CONFIG.get(key, "")))
     form["interval_minutes"] = str(cfg.get("interval_minutes", watch.DEFAULT_CONFIG["interval_minutes"]))
     return form
@@ -89,10 +96,11 @@ def config_from_form(form: dict) -> dict:
         "openid": str(form.get("openid", "")).strip(),
         "notify": bool(form.get("notify", True)),
         "autostart": bool(form.get("autostart", True)),
+        "language": i18n.normalize_language(form.get("language")),
         "exclude_ref_patterns": list(form.get("exclude_ref_patterns", [])),
         "git_ssl_backend": str(form.get("git_ssl_backend", "") or ""),
     }
-    for key in ("interval_minutes", *(key for key, _ in NUMERIC_FIELDS)):
+    for key in ("interval_minutes", *NUMERIC_FIELDS):
         raw = form.get(key, "")
         text = str(raw).strip()
         try:
@@ -109,7 +117,7 @@ def load_form(root: Path, config_path: Path | None = None) -> tuple[dict, str | 
         cfg = settings.load(root, config_path)
     except (OSError, ValueError) as exc:
         cfg = dict(watch.DEFAULT_CONFIG)
-        notice = f"读取配置失败，下面显示的是默认值：{exc}"
+        notice = i18n.t("zh", "panel.notice_load_failed", error=exc)  # 配置坏了，语言只能按默认
     try:
         secrets = settings.read_secrets(root)
     except OSError as exc:  # 读 .env 出错不该让面板起不来
@@ -117,26 +125,30 @@ def load_form(root: Path, config_path: Path | None = None) -> tuple[dict, str | 
     return form_from_config(cfg, secrets), notice
 
 
-def format_report(report) -> str:  # noqa: ANN001 - watch.RoundReport
+def format_report(report, lang: str = "zh") -> str:  # noqa: ANN001 - watch.RoundReport
     """一轮结束后的一句话，给状态行用。"""
-    head = _STATUS_TEXT.get(report.status, report.status)
+    status = str(report.status)
+    head = i18n.t(lang, _STATUS_KEYS[status]) if status in _STATUS_KEYS else status
     if report.skipped == "lock":
-        return "跳过：上一轮仍在运行"
-    details = [head, f"{report.repos} 个仓库"]
+        return i18n.t(lang, "panel.report_skip_lock")
+    details = [head, i18n.t(lang, "panel.report_repos", count=report.repos)]
     if report.failures:
-        details.append(f"{report.failures} 个失败")
+        details.append(i18n.t(lang, "panel.report_failures", count=report.failures))
     if report.sent:
-        details.append(f"已推送 {report.sent} 条")
+        details.append(i18n.t(lang, "panel.report_sent", count=report.sent))
     elif report.parts:
-        details.append(f"{len(report.parts)} 条待发")
+        details.append(i18n.t(lang, "panel.report_pending", count=len(report.parts)))
     return " · ".join(details)
 
 
-def preview_text(report) -> str:  # noqa: ANN001 - watch.RoundReport
+def preview_text(report, lang: str = "zh") -> str:  # noqa: ANN001 - watch.RoundReport
     """预览抽屉的内容：分片原样拼起来。"""
     if not report.parts:
-        return "（这一轮没有要发送的内容）"
-    return "\n\n".join(f"----- 第 {index} 条（{len(part)} 字）-----\n{part}" for index, part in enumerate(report.parts, 1))
+        return i18n.t(lang, "panel.preview_empty")
+    return "\n\n".join(
+        f"{i18n.t(lang, 'panel.preview_part', index=index, chars=len(part))}\n{part}"
+        for index, part in enumerate(report.parts, 1)
+    )
 
 
 def log_files(root: Path) -> list[Path]:
@@ -146,17 +158,17 @@ def log_files(root: Path) -> list[Path]:
     return sorted(logdir.glob("watch-*.log"), key=lambda path: path.name)
 
 
-def tail_log(root: Path, lines: int = 200) -> str:
+def tail_log(root: Path, lines: int = 200, lang: str = "zh") -> str:
     """最新一天的日志尾部；没有日志时给一句人话，而不是抛异常。"""
     files = log_files(root)
     if not files:
-        return "还没有日志 —— 跑一轮之后这里就会有内容。"
+        return i18n.t(lang, "panel.log_missing")
     try:
         content = files[-1].read_text(encoding="utf-8", errors="replace")
     except OSError as exc:
-        return f"读日志失败：{exc}"
+        return i18n.t(lang, "panel.log_failed", error=exc)
     tail = content.splitlines()[-lines:]
-    return "\n".join(tail) or "（日志是空的）"
+    return "\n".join(tail) or i18n.t(lang, "panel.log_empty")
 
 
 def git_available() -> bool:
@@ -167,7 +179,10 @@ def git_available() -> bool:
 
 
 class Panel:
-    """唯一的 Tk 窗口。关闭 = 隐藏，不销毁 —— 销毁会让 mainloop 失去泵。"""
+    """唯一的 Tk 窗口。关闭 = 隐藏，不销毁 —— 销毁会让 mainloop 失去泵。
+
+    lang 在构造时定死（标签建一次）；改了语言保存后由托盘销毁重建本窗口。
+    """
 
     def __init__(
         self,
@@ -178,9 +193,12 @@ class Panel:
         on_run: Callable[[bool], bool],
         get_status: Callable[[], str],
         task_hint: str | Callable[[], str] = "",
+        lang: str = "zh",
     ) -> None:
+        self._lang = i18n.normalize_language(lang)
         if tk is None:  # pragma: no cover - 没有 tkinter 时托盘根本不会用面板
-            raise RuntimeError("这台机器没有 tkinter，无法显示设置面板")
+            # 与托盘启动弹框同一句：这条只有在绕过 tray.main 直接构造面板时才可能看到。
+            raise RuntimeError(self._t("tray.no_tkinter"))
         self._tk_root = root
         self._root_dir = Path(root_dir)
         self._config_path = Path(config_path)
@@ -195,10 +213,13 @@ class Panel:
         self._notice = ""
         self._build()
 
+    def _t(self, key: str, **kwargs: object) -> str:
+        return i18n.t(self._lang, key, **kwargs)
+
     # -- 构建 ----------------------------------------------------------
     def _build(self) -> None:
         window = tk.Toplevel(self._tk_root)
-        window.title(TITLE)
+        window.title(self._t("panel.title"))
         window.protocol("WM_DELETE_WINDOW", self.hide)
         window.withdraw()
         window.columnconfigure(0, weight=1)
@@ -211,23 +232,27 @@ class Panel:
 
         notebook = ttk.Notebook(window)
         notebook.grid(row=2, column=0, sticky="nsew", padx=14, pady=(10, 0))
-        notebook.add(self._build_repos_tab(notebook), text="仓库")
-        notebook.add(self._build_notify_tab(notebook), text="通知")
-        notebook.add(self._build_schedule_tab(notebook), text="调度")
-        notebook.add(self._build_advanced_tab(notebook), text="高级")
+        notebook.add(self._build_repos_tab(notebook), text=self._t("panel.tab_repos"))
+        notebook.add(self._build_notify_tab(notebook), text=self._t("panel.tab_notify"))
+        notebook.add(self._build_schedule_tab(notebook), text=self._t("panel.tab_schedule"))
+        notebook.add(self._build_advanced_tab(notebook), text=self._t("panel.tab_advanced"))
 
         self._error_label = tk.Label(window, anchor="w", justify="left", fg="#b91c1c", wraplength=740)
         self._error_label.grid(row=3, column=0, sticky="ew", padx=14)
 
         buttons = tk.Frame(window)
         buttons.grid(row=4, column=0, sticky="ew", padx=14, pady=10)
-        tk.Button(buttons, text="保存", width=9, command=self.save).pack(side="left")
-        tk.Button(buttons, text="取消", width=7, command=self.hide).pack(side="left", padx=(8, 0))
-        tk.Button(buttons, text="立即运行一轮", command=lambda: self._trigger(dry_run=False)).pack(side="right")
-        tk.Button(buttons, text="预览", width=7, command=lambda: self._trigger(dry_run=True)).pack(
+        tk.Button(buttons, text=self._t("panel.save"), width=9, command=self.save).pack(side="left")
+        tk.Button(buttons, text=self._t("panel.cancel"), width=7, command=self.hide).pack(side="left", padx=(8, 0))
+        tk.Button(buttons, text=self._t("panel.run_now_button"), command=lambda: self._trigger(dry_run=False)).pack(
+            side="right"
+        )
+        tk.Button(buttons, text=self._t("panel.preview_button"), width=7, command=lambda: self._trigger(dry_run=True)).pack(
             side="right", padx=(0, 8)
         )
-        tk.Button(buttons, text="日志", width=7, command=self.toggle_log).pack(side="right", padx=(0, 8))
+        tk.Button(buttons, text=self._t("panel.log_button"), width=7, command=self.toggle_log).pack(
+            side="right", padx=(0, 8)
+        )
 
         self._log_box = scrolledtext.ScrolledText(window, height=9, state="disabled", wrap="none")
         self._log_visible = False
@@ -242,9 +267,7 @@ class Panel:
 
     def _build_repos_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent)
-        tk.Label(
-            frame, text="被监视仓库（owner/name；也可以直接粘贴 GitHub 链接）", anchor="w"
-        ).pack(fill="x", padx=12, pady=(10, 6))
+        tk.Label(frame, text=self._t("panel.repos_label"), anchor="w").pack(fill="x", padx=12, pady=(10, 6))
         body = tk.Frame(frame)
         body.pack(fill="both", expand=True, padx=12)
         scroll = tk.Scrollbar(body)
@@ -259,14 +282,18 @@ class Panel:
         self._repo_entry = tk.Entry(entry_row)
         self._repo_entry.pack(side="left", fill="x", expand=True)
         self._repo_entry.bind("<Return>", lambda _event: self.add_repo())
-        tk.Button(entry_row, text="添加", width=7, command=self.add_repo).pack(side="left", padx=(8, 0))
+        tk.Button(entry_row, text=self._t("panel.add"), width=7, command=self.add_repo).pack(side="left", padx=(8, 0))
 
         actions = tk.Frame(frame)
         actions.pack(fill="x", padx=12, pady=(0, 10))
-        tk.Button(actions, text="删除选中", command=self.remove_selected).pack(side="left")
-        tk.Button(actions, text="上移", width=7, command=lambda: self.move_selected(-1)).pack(side="left", padx=(8, 0))
-        tk.Button(actions, text="下移", width=7, command=lambda: self.move_selected(1)).pack(side="left", padx=(8, 0))
-        tk.Label(actions, text="新仓库首次运行是静默的（只建基线）", fg="#64748b").pack(side="right")
+        tk.Button(actions, text=self._t("panel.remove"), command=self.remove_selected).pack(side="left")
+        tk.Button(actions, text=self._t("panel.up"), width=7, command=lambda: self.move_selected(-1)).pack(
+            side="left", padx=(8, 0)
+        )
+        tk.Button(actions, text=self._t("panel.down"), width=7, command=lambda: self.move_selected(1)).pack(
+            side="left", padx=(8, 0)
+        )
+        tk.Label(actions, text=self._t("panel.repos_hint"), fg="#64748b").pack(side="right")
         return frame
 
     def _build_notify_tab(self, parent: tk.Widget) -> tk.Widget:
@@ -277,22 +304,24 @@ class Panel:
         self._vars["secret"] = tk.StringVar()
         self._vars["notify"] = tk.BooleanVar(value=True)
 
-        self._field(frame, 0, "接收方 openid", tk.Entry, textvariable=self._vars["openid"])
-        self._field(frame, 1, "机器人 AppID", tk.Entry, textvariable=self._vars["appid"])
+        self._field(frame, 0, self._t("panel.field_openid"), tk.Entry, textvariable=self._vars["openid"])
+        self._field(frame, 1, self._t("panel.field_appid"), tk.Entry, textvariable=self._vars["appid"])
 
         def secret_row(holder: tk.Widget) -> tk.Widget:
             row = tk.Frame(holder)
             entry = tk.Entry(row, textvariable=self._vars["secret"], show="*")
             entry.pack(side="left", fill="x", expand=True)
             self._secret_entry = entry
-            tk.Button(row, text="显示", width=6, command=self._toggle_secret).pack(side="left", padx=(8, 0))
+            tk.Button(row, text=self._t("panel.show"), width=6, command=self._toggle_secret).pack(
+                side="left", padx=(8, 0)
+            )
             return row
 
-        self._field(frame, 2, "机器人 AppSecret", secret_row)
+        self._field(frame, 2, self._t("panel.field_secret"), secret_row)
 
-        tk.Checkbutton(
-            frame, text="启用 QQ 推送（关闭 = 只记录状态，从不发送）", variable=self._vars["notify"]
-        ).grid(row=3, column=1, sticky="w", pady=(14, 2))
+        tk.Checkbutton(frame, text=self._t("panel.notify_label"), variable=self._vars["notify"]).grid(
+            row=3, column=1, sticky="w", pady=(14, 2)
+        )
 
         self._secret_hint = tk.Label(frame, anchor="w", justify="left", fg="#475569", wraplength=820)
         self._secret_hint.grid(row=4, column=1, sticky="w", pady=(6, 0))
@@ -302,8 +331,7 @@ class Panel:
             justify="left",
             fg="#64748b",
             wraplength=820,
-            text="凭据写在数据目录的 .env 里（QQBOT_APPID / QQBOT_SECRET），环境变量优先；"
-            "这里的值不会进 config.json。",
+            text=self._t("panel.secrets_hint"),
         ).grid(row=5, column=1, sticky="w", pady=(6, 0))
         return frame
 
@@ -312,27 +340,45 @@ class Panel:
         frame.columnconfigure(1, weight=1)
         self._vars["interval_minutes"] = tk.StringVar()
         self._vars["autostart"] = tk.BooleanVar(value=True)
+        self._vars["language"] = tk.StringVar()
         self._field(
-            frame, 0, "调度周期（分钟）", tk.Entry, textvariable=self._vars["interval_minutes"], width=8, wide=False
+            frame, 0, self._t("panel.field_interval"), tk.Entry, textvariable=self._vars["interval_minutes"], width=8, wide=False
         )
-        tk.Checkbutton(frame, text="登录时自动启动（写 HKCU 的 Run 项）", variable=self._vars["autostart"]).grid(
+        tk.Checkbutton(frame, text=self._t("panel.autostart_label"), variable=self._vars["autostart"]).grid(
             row=1, column=1, sticky="w", pady=(12, 2)
         )
+        self._field(
+            frame,
+            2,
+            self._t("panel.field_language"),
+            ttk.Combobox,
+            textvariable=self._vars["language"],
+            values=list(LANG_DISPLAY.values()),
+            width=12,
+            state="readonly",
+            wide=False,
+        )
         self._task_label = tk.Label(frame, anchor="w", justify="left", fg="#475569", wraplength=820)
-        self._task_label.grid(row=2, column=1, sticky="w", pady=(10, 0))
+        self._task_label.grid(row=3, column=1, sticky="w", pady=(10, 0))
         self.set_task_hint(self._task_hint)
         return frame
 
     def _build_advanced_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent)
         frame.columnconfigure(1, weight=1)
-        for index, (key, label) in enumerate(NUMERIC_FIELDS):
+        for index, key in enumerate(NUMERIC_FIELDS):
             self._vars[key] = tk.StringVar()
             self._field(
-                frame, index, label, tk.Entry, textvariable=self._vars[key], width=10, wide=False
+                frame,
+                index,
+                self._t(f"panel.field_{key}"),
+                tk.Entry,
+                textvariable=self._vars[key],
+                width=10,
+                wide=False,
             )
 
-        tk.Label(frame, text="exclude_ref_patterns（每行一个 fnmatch 模式）", anchor="w").grid(
+        tk.Label(frame, text=self._t("panel.patterns_label"), anchor="w").grid(
             row=len(NUMERIC_FIELDS), column=0, columnspan=2, sticky="w", padx=12, pady=(14, 4)
         )
         self._patterns = tk.Text(frame, height=4, wrap="none")
@@ -380,7 +426,9 @@ class Panel:
             self._vars[key].set(form.get(key, ""))
         self._vars["notify"].set(bool(form.get("notify", True)))
         self._vars["autostart"].set(bool(form.get("autostart", True)))
-        for key, _label in NUMERIC_FIELDS:
+        language = i18n.normalize_language(form.get("language"))
+        self._vars["language"].set(LANG_DISPLAY.get(language, language))
+        for key in NUMERIC_FIELDS:
             self._vars[key].set(form.get(key, watch.DEFAULT_CONFIG.get(key, "")))
         self._patterns.delete("1.0", "end")
         self._patterns.insert("1.0", "\n".join(form.get("exclude_ref_patterns", [])))
@@ -388,15 +436,18 @@ class Panel:
         self._set_notice(notice or "")
 
     def _collect(self) -> dict:
+        # 语言选择框显示的是人话；不认识的显示值按原样交给 normalize 兜底。
+        language_display = str(self._vars["language"].get())
         form = {
             "repos": list(self._repos),
             "openid": self._vars["openid"].get(),
             "notify": bool(self._vars["notify"].get()),
             "autostart": bool(self._vars["autostart"].get()),
+            "language": LANG_CODES.get(language_display, language_display),
             "exclude_ref_patterns": self._patterns.get("1.0", "end").splitlines(),
             "git_ssl_backend": self._vars["git_ssl_backend"].get(),
         }
-        for key in ("interval_minutes", *(key for key, _ in NUMERIC_FIELDS)):
+        for key in ("interval_minutes", *NUMERIC_FIELDS):
             form[key] = self._vars[key].get()
         return form
 
@@ -437,7 +488,8 @@ class Panel:
 
     def save(self) -> None:
         values = config_from_form(self._collect())
-        errors = settings.validate(values)
+        # 校验报错用表单里新选的语言：正在切语言的人用目标语言看报错。
+        errors = settings.validate(values, lang=i18n.normalize_language(values.get("language")))
         if errors:
             self._error_label.config(text="\n".join(errors[:6]))
             return
@@ -447,24 +499,24 @@ class Panel:
                 self._root_dir, str(self._vars["appid"].get()), str(self._vars["secret"].get())
             )
         except OSError as exc:
-            self._error_label.config(text=f"保存失败：{exc}")
+            self._error_label.config(text=self._t("panel.notice_save_failed", error=exc))
             return
         self._error_label.config(text="")
-        self._set_notice(f"已保存到 {self._config_path}")
+        self._set_notice(self._t("panel.notice_saved", path=self._config_path))
         self._on_saved(values)
 
     def _trigger(self, dry_run: bool) -> None:
         if self._on_run(dry_run):
-            self._set_notice("预览运行中…" if dry_run else "运行中…")
+            self._set_notice(self._t("panel.notice_preview_running" if dry_run else "panel.notice_running"))
         else:
-            self._set_notice("上一轮还没结束，先等它跑完。")
+            self._set_notice(self._t("common.round_busy"))
 
     def toggle_log(self) -> None:
         if self._log_visible:
             self._log_box.grid_remove()
             self._log_visible = False
             return
-        self._write_log(tail_log(self._root_dir))
+        self._write_log(tail_log(self._root_dir, lang=self._lang))
         self._log_box.grid(row=5, column=0, sticky="ew", padx=14, pady=(0, 12))
         self._log_visible = True
 
@@ -509,10 +561,15 @@ class Panel:
     def show(self) -> None:
         form, notice = load_form(self._root_dir, self._config_path)
         self._fill(form, notice)
-        source = settings.read_secrets(self._root_dir).get("source") or "（还没找到）"
-        self._secret_hint.config(text=f"当前凭据来源：{source}")
+        # ENV_SOURCE 是「凭据来自环境变量」的哨兵，翻成当前语言；文件路径是数据，原样。
+        source = settings.read_secrets(self._root_dir).get("source")
+        if source == qq_notify.ENV_SOURCE:
+            source = self._t("panel.cred_from_env")
+        elif not source:
+            source = self._t("panel.cred_none")
+        self._secret_hint.config(text=self._t("panel.cred_source", source=source))
         if not git_available():
-            self._set_notice("没找到 git —— 抓取会全部失败，请先安装 Git for Windows。")
+            self._set_notice(self._t("panel.notice_no_git"))
         window = self._window
         if window is None:  # pragma: no cover - 构造时一定会有窗口
             return
