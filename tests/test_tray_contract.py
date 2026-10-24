@@ -12,6 +12,7 @@ from __future__ import annotations
 import ctypes
 import importlib.util
 import inspect
+import json
 import os
 import queue
 import sys
@@ -131,6 +132,35 @@ class MenuContractTest(unittest.TestCase):
             self.assertEqual(self.app._status_text(None), "Status: running…")
         finally:
             self.app.scheduler._running = False
+
+    def language_submenu(self):  # noqa: ANN201 - pystray 的 MenuItem，本模块只在装了依赖时可达
+        for item in self.menu:
+            if item.submenu is not None:
+                return item
+        self.fail("托盘菜单里应当有「界面语言」子菜单")
+
+    def test_language_submenu_switches_language(self) -> None:
+        """英文用户不必先进中文面板：托盘里就能切，且写的是同一份 config。"""
+        item = self.language_submenu()
+        self.assertEqual(item.text, "界面语言")
+        self.assertEqual({entry.text: entry.checked for entry in item.submenu}, {"中文": True, "English": False})
+
+        self.app.set_language("en")
+
+        saved = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(saved, {"language": "en"})
+        self.assertEqual(item.text, "Language", "update_menu 重画时子菜单标题也要跟着语言变")
+        self.assertEqual({entry.text: entry.checked for entry in item.submenu}, {"中文": False, "English": True})
+        self.assertIn("Run a round now", [entry.text for entry in self.menu])
+
+    def test_status_line_reports_the_round_once(self) -> None:
+        """回归：_after_round 曾把报告同时写进 _note，状态行因此出现两遍。"""
+        report = watch.RoundReport(repos=5, sent=1)
+        self.app._last_report = report
+        self.app._after_round(report)
+        line = self.app.status_line()
+        self.assertEqual(line.count("已推送 1 条"), 1, line)
+        self.assertEqual(self.app._note, "", "报告不该再占用临时提示位")
 
 
 @unittest.skipUnless(tray is not None, "需要 Windows + pystray + PIL + tkinter")

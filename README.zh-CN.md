@@ -138,6 +138,7 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 | 立即运行一轮 | 手动一轮：不动调度周期，也不挪动下一次的时间点 |
 | 预览（不发送） | 和 `--dry-run` 同义：只显示将要发送的内容，**不发送、不推进基线** |
 | 打开设置… | 设置面板（双击图标同效） |
+| 界面语言 → 中文 / English | 直接切换界面语言（写 `config.json` 的 `language`，保存即全生效） |
 | 打开日志 / 打开数据目录 | 开资源管理器 |
 | 开机自启 | 开关；`autostart` 是真相，注册表是它的投影 |
 | 暂停调度 | 只停自动调度，手动一轮仍可用；重启即恢复 |
@@ -145,6 +146,7 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 
 菜单与面板文案跟随 `language`（上表菜单名是 `zh` 默认值）：面板里保存语言后，
 菜单立即按新语言重画，面板按新语言重建；摘要与日志从下一轮起换语言。
+托盘的「界面语言」子菜单也能直接切换，英文用户不必先打开中文面板。
 
 设置面板四页：[仓库](docs/screenshots/panel-repos.png) ·
 [通知](docs/screenshots/panel-notify.png) · [调度](docs/screenshots/panel-schedule.png) ·
@@ -159,6 +161,8 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 - **合并写**：面板不认识的键原样保留；文件被写坏了先备份成 `config.json.bak.<时间戳>` 再写；
   落盘是原子替换，并发的另一轮不会读到半个文件。
 - **凭据只进 `.env`**，不进 `config.json`；面板会显示「当前凭据来源」。
+- **未保存修改有提示**：面板里改动任何字段（含凭据）都会出现「有未保存的修改」；
+  关闭、取消、退出或从托盘切语言前会先确认，不会静默丢弃。
 - **单实例**：第二次启动会告诉你「已经在运行」，图标可能在任务栏 `^` 折叠区里。
 - 崩溃可见：未捕获异常写 `logs/crash.log`（凭据已打码）并弹框，而不是「双击没反应」。
 - 托盘自己的 `schtasks` 子进程也带 `CREATE_NO_WINDOW`，不会闪黑窗口（同 [ADR-0003](docs/adr/0003-windowless-scheduled-run.md)）。

@@ -60,15 +60,18 @@ python -X utf8 -m unittest discover -s tests     # CI 主体；别再引第三�
 `_one` 后缀是单数变体（zh 两式同文，代码按计数选，不按语言分叉）。
 
 托盘菜单标签是 pystray 的 callable `text`，`update_menu()` 时按当前 `cfg` 重算 —— 语言
-因此能热切换；面板标签建一次，换语言后由 `App.on_saved` 销毁重建。
+因此能热切换（含「界面语言」子菜单的勾选）；面板标签建一次，换语言后由
+`App.set_language`/`on_saved` 销毁重建。
 
 ## 面板截图（docs/screenshots/*.png）
 
-现有截图全是 1180×723、无标题栏、DPI-aware 的客户区。复现配方：
+现有截图全是 1180×799、无标题栏、DPI-aware 的客户区。复现配方：
 
 1. `tray.enable_dpi_awareness()`（必须在创建 Tk 之前，否则是位图拉伸）；
 2. 直接构造 `panel.Panel(...)`，`on_saved`/`on_run`/`get_status` 传假回调，
    数据目录塞一份临时 `config.json`（可选 `.env` 或凭据环境变量）；
+   **先把所有通道的凭据环境变量清空**（`channels.env_keys_of`），否则通知页会显示
+   这台机器真实的值；再把 `DSH_HOME` 指到不存在的目录，避免读到 `~/.dsh/.env`；
 3. `p.show()` → 从 `p._window` 的子控件里找 `ttk.Notebook` 并 `select(页号)`；
 4. `ImageGrab.grab(bbox=(winfo_rootx, winfo_rooty, +winfo_width, +winfo_height), all_screens=True)`。
 

@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -16,6 +18,7 @@ sys.path.insert(0, str(HERE.parent))
 
 from helpers import rmtree, temp_root  # noqa: E402
 
+import channels  # noqa: E402
 import panel  # noqa: E402
 import settings  # noqa: E402
 import watch  # noqa: E402
@@ -70,10 +73,17 @@ class FormRoundTripTest(unittest.TestCase):
 
     def test_config_to_form_then_back_is_stable(self) -> None:
         cfg = self.cfg(interval_minutes=7, notify=False, autostart=True)
-        form = panel.form_from_config(cfg, {"appid": "id", "secret": "s", "source": "x"})
+        form = panel.form_from_config(cfg)
         self.assertEqual(form["interval_minutes"], "7", "数字在 Entry 里应该是字符串")
-        self.assertEqual(form["appid"], "id")
         self.assertEqual(panel.config_from_form(form)["repos"], ["a/b"])
+
+    def test_credential_fields_use_the_env_key_names(self) -> None:
+        """凭据只有一套命名（env 键小写）—— 显示与保存都按它查表，不可能再错位。"""
+        form = panel.form_from_config(self.cfg())
+        self.assertIn("qqbot_appid", form)
+        self.assertIn("qqbot_secret", form)
+        self.assertNotIn("appid", form)
+        self.assertNotIn("secret", form)
 
     def test_garbage_number_survives_until_validate(self) -> None:
         form = panel.form_from_config(self.cfg())
@@ -97,9 +107,17 @@ class LoadFormTest(unittest.TestCase):
         watch.HERE = self.root
         self.addCleanup(setattr, watch, "HERE", self._here)
 
+    def _quiet_env(self) -> dict[str, str]:
+        """把真实环境里的凭据清掉：读盘测试只能看见本用例写的那份 .env。"""
+        env = {key: "" for code in channels.CHANNELS for key in channels.env_keys_of(code)}
+        env["DSH_HOME"] = str(self.root / "legacy-home")
+        env["QQBOT_ENV_FILE"] = ""
+        return env
+
     def test_reads_disk_values(self) -> None:
         (self.root / "config.json").write_text(json.dumps({"repos": ["x/y"], "openid": "o"}), encoding="utf-8")
-        form, notice = panel.load_form(self.root)
+        with mock.patch.dict(os.environ, self._quiet_env()):
+            form, notice = panel.load_form(self.root)
         self.assertIsNone(notice)
         self.assertEqual(form["repos"], ["x/y"])
         self.assertEqual(form["openid"], "o")
@@ -115,6 +133,51 @@ class LoadFormTest(unittest.TestCase):
         form, notice = panel.load_form(self.root)
         self.assertIsNone(notice)
         self.assertEqual(form["repos"], [])
+
+    def test_qq_credentials_are_loaded_into_the_env_key_form(self) -> None:
+        """回归：表单曾用 appid/secret、控件却绑 qqbot_* —— 两个框恒空，编辑还被丢弃。"""
+        (self.root / "config.json").write_text(json.dumps({"repos": ["a/b"]}), encoding="utf-8")
+        (self.root / ".env").write_text("QQBOT_APPID=file-id\nQQBOT_SECRET=file-secret\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, self._quiet_env()):
+            form, notice = panel.load_form(self.root)
+        self.assertIsNone(notice)
+        self.assertEqual(form["channel"], "qq")
+        self.assertEqual(form["qqbot_appid"], "file-id")
+        self.assertEqual(form["qqbot_secret"], "file-secret")
+
+    def test_all_channels_are_preloaded_not_just_the_selected_one(self) -> None:
+        """切通道时应当看到该通道已配置的值，而不是空白。"""
+        (self.root / "config.json").write_text(json.dumps({"channel": "wecom"}), encoding="utf-8")
+        (self.root / ".env").write_text("WECOM_WEBHOOK=https://example.invalid/hook\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, self._quiet_env()):
+            form, _notice = panel.load_form(self.root)
+        self.assertEqual(form["channel"], "wecom")
+        self.assertEqual(form["wecom_webhook"], "https://example.invalid/hook")
+        self.assertEqual(form["qqbot_appid"], "", "未配置的通道保持空，不是别的通道的值")
+
+
+class ChannelSecretsTest(unittest.TestCase):
+    """表单 → .env 的唯一映射：保存与脏状态比较都走这里。"""
+
+    def test_qq_maps_to_uppercase_env_keys(self) -> None:
+        form = {"qqbot_appid": " id ", "qqbot_secret": "s3cret"}
+        self.assertEqual(
+            panel.channel_secrets(form, "qq"),
+            {"QQBOT_APPID": "id", "QQBOT_SECRET": "s3cret"},
+        )
+
+    def test_channel_spec_order_and_missing_values(self) -> None:
+        self.assertEqual(
+            panel.channel_secrets({"wecom_webhook": "https://hook"}, "wecom"),
+            {"WECOM_WEBHOOK": "https://hook"},
+        )
+        self.assertEqual(panel.channel_secrets({}, "bark"), {"BARK_KEY": "", "BARK_SERVER": ""})
+
+    def test_invalid_channel_falls_back_to_qq(self) -> None:
+        self.assertEqual(
+            panel.channel_secrets({"qqbot_appid": "id"}, "icq"),
+            {"QQBOT_APPID": "id", "QQBOT_SECRET": ""},
+        )
 
 
 class LogTailTest(unittest.TestCase):

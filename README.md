@@ -143,6 +143,7 @@ Right-click the icon:
 | 立即运行一轮 | a manual round: does not change the schedule or move the next run |
 | 预览（不发送） | same as `--dry-run`: renders what would be sent, **sends nothing, keeps the baseline** |
 | 打开设置… | the settings panel (double-click does the same) |
+| 界面语言 → 中文 / English | switch the UI language from the tray (writes `config.json`'s `language`) |
 | 打开日志 / 打开数据目录 | open Explorer |
 | 开机自启 | toggle; `autostart` is the truth, the registry value is its projection |
 | 暂停调度 | stops automatic scheduling only; manual rounds still work (resets on restart) |
@@ -150,7 +151,8 @@ Right-click the icon:
 
 The menu and panel follow `language` (the Chinese item names above are the `zh` default):
 saving a new language redraws the menu immediately and rebuilds the panel in it; digests
-and log lines switch from the next round on.
+and log lines switch from the next round on. The tray's `界面语言` submenu switches directly,
+so an English user never has to start from the Chinese panel.
 
 Panel tabs: [repositories](docs/screenshots/panel-repos.png) ·
 [notifications](docs/screenshots/panel-notify.png) · [schedule](docs/screenshots/panel-schedule.png) ·
@@ -165,6 +167,8 @@ Guarantees worth knowing:
 - **Merge writes**: keys the panel does not know survive; a broken file is backed up to
   `config.json.bak.<timestamp>` first; writes are atomic so a concurrent round never reads half a file.
 - **Credentials only go to `.env`**, never into `config.json`; the panel shows where it read them from.
+- **Unsaved changes are visible**: editing any field (credentials included) shows "unsaved changes";
+  closing, cancelling, quitting or switching language from the tray asks first instead of discarding silently.
 - **Single instance**: a second launch tells you it is already running and that the icon may be folded
   into the taskbar's `^` area.
 - Crashes are visible: uncaught exceptions go to `logs/crash.log` (credentials redacted) and to a

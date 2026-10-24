@@ -284,6 +284,23 @@ class App:
             MenuItem(self._label("tray.menu_run_now"), self._on_run_now),
             MenuItem(self._label("tray.menu_preview"), self._on_preview),
             MenuItem(self._label("tray.menu_settings"), self._on_open_panel, default=True),
+            MenuItem(
+                self._label("tray.menu_language"),
+                Menu(
+                    MenuItem(
+                        panel.LANG_DISPLAY["zh"],
+                        self._lang_action("zh"),
+                        checked=self._lang_checked("zh"),
+                        radio=True,
+                    ),
+                    MenuItem(
+                        panel.LANG_DISPLAY["en"],
+                        self._lang_action("en"),
+                        checked=self._lang_checked("en"),
+                        radio=True,
+                    ),
+                ),
+            ),
             Menu.SEPARATOR,
             MenuItem(self._label("tray.menu_logs"), self._on_open_logs),
             MenuItem(self._label("tray.menu_data"), self._on_open_data),
@@ -313,6 +330,16 @@ class App:
 
     def _paused_checked(self, _item: object) -> bool:
         return self.scheduler.paused
+
+    def _lang_action(self, code: str) -> Callable[[object, object], None]:
+        """语言子菜单的动作：回调在 pystray 线程，必须桥接回 Tk 线程。"""
+        def action(_icon: object, _item: object) -> None:
+            self._in_tk(lambda: self.set_language(code))
+
+        return action
+
+    def _lang_checked(self, code: str) -> Callable[[object], bool]:
+        return lambda _item: self.lang == code
 
     def _redraw_menu(self) -> None:
         with contextlib.suppress(Exception):
@@ -390,9 +417,14 @@ class App:
         self._in_tk(lambda: self._append_log(line))
 
     def _after_round(self, report) -> None:  # noqa: ANN001 - watch.RoundReport
-        self._set_note(panel.format_report(report, lang=self.lang))
-        if self.panel_visible():
-            self._append_log(panel.format_report(report, lang=self.lang))
+        text = panel.format_report(report, lang=self.lang)
+        # 本轮结果已经由 status_line() 从 _last_report 拼出来；再写进 _note 会让
+        # 状态行出现两遍同样的句子（截图反馈 #1）。
+        self._note = ""
+        self._redraw_menu()
+        if self.panel_visible() and self._panel is not None:
+            self._panel.set_notice(text)
+            self._append_log(text)
             if report.status == "dry-run":
                 self._append_log(panel.preview_text(report, lang=self.lang))
 
@@ -428,15 +460,37 @@ class App:
         # 语言变了：面板标签建一次、菜单标签每次重画求值 —— 重建面板 + 重画菜单，
         # 未保存的表单内容只在换语言时丢失（这是「保存即全生效」的代价）。
         if self._panel is not None and self.lang != old_lang:
-            self._rebuild_panel()
+            self._rebuild_panel(show=True)
         self._redraw_menu()
 
-    def _rebuild_panel(self) -> None:
+    def _rebuild_panel(self, show: bool) -> None:
+        """销毁现有面板（标签在构造时定死语言）；show=False 就等下次打开再建。"""
         if self._panel is not None:
             with contextlib.suppress(Exception):
                 self._panel.destroy()
             self._panel = None
-        self.open_panel()
+        if show:
+            self.open_panel()
+
+    def set_language(self, code: str) -> None:
+        """托盘「界面语言」：写盘 + 热重画菜单 + 按新语言重建面板。
+
+        面板里有未保存修改时先问一句 —— 重建面板会把这些修改丢掉。
+        """
+        code = normalize_language(code)
+        if code == self.lang:
+            return
+        if self._panel is not None and self.panel_visible() and not self._panel.confirm_discard():
+            return
+        try:
+            settings.save_config(self.config_path, {"language": code})
+        except OSError as exc:
+            self._set_note(t(self.lang, "tray.note_language_failed", error=exc))
+            return
+        self.cfg["language"] = code
+        was_visible = self.panel_visible()
+        self._rebuild_panel(show=was_visible)
+        self._redraw_menu()
 
     def set_autostart(self, enabled: bool) -> None:
         """菜单里的开关：注册表与 config.json 一起改（配置是真相，注册表是投影）。"""
@@ -488,6 +542,8 @@ class App:
             self._set_note(t(self.lang, "tray.note_open_failed", target=target, error=exc))
 
     def request_quit(self) -> None:
+        if self._panel is not None and self.panel_visible() and not self._panel.confirm_discard():
+            return
         self.scheduler.stop(timeout=5.0)
         with contextlib.suppress(Exception):
             self.icon.stop()

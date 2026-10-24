@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import sys
 from pathlib import Path
@@ -29,9 +30,12 @@ import watch  # noqa: E402
 
 try:  # 精简发行版/CI 镜像可能没有 tkinter：纯逻辑部分不该因此不可测。
     import tkinter as tk
-    from tkinter import scrolledtext, ttk
+    from tkinter import font as tkfont
+    from tkinter import messagebox, scrolledtext, ttk
 except ImportError:  # pragma: no cover
     tk = None  # type: ignore[assignment]
+    tkfont = None  # type: ignore[assignment]
+    messagebox = None  # type: ignore[assignment]
     scrolledtext = None  # type: ignore[assignment]
     ttk = None  # type: ignore[assignment]
 
@@ -66,21 +70,26 @@ _STATUS_KEYS = {
 # ---------------------------------------------------------------- 纯逻辑
 
 
-def form_from_config(cfg: dict, secrets: dict | None = None) -> dict:
-    """配置 → 表单值。数字一律转成字符串（Entry 里就是文本），布尔保持布尔。"""
-    found = secrets or {"appid": "", "secret": "", "source": ""}
+def form_from_config(cfg: dict) -> dict:
+    """配置 → 表单值。数字一律转成字符串（Entry 里就是文本），布尔保持布尔。
+
+    凭据不在这里填：表单里的凭据键统一是「env 键小写」（qq 就是 qqbot_appid /
+    qqbot_secret），由 load_form() 从环境变量/.env 回填 —— 面板显示、保存、脏状态
+    比较因此只有一套命名，不会再出现「显示恒空、编辑被丢掉」的两种键名。
+    """
     form: dict = {
         "repos": list(cfg.get("repos") or []),
         "channel": channels.normalize_channel(cfg.get("channel")),
         "openid": str(cfg.get("openid") or ""),
-        "appid": str(found.get("appid") or ""),
-        "secret": str(found.get("secret") or ""),
         "notify": bool(cfg.get("notify", True)),
         "autostart": bool(cfg.get("autostart", True)),
         "language": i18n.normalize_language(cfg.get("language")),
         "exclude_ref_patterns": list(cfg.get("exclude_ref_patterns") or []),
         "git_ssl_backend": str(cfg.get("git_ssl_backend", "") or ""),
     }
+    for code in channels.CHANNELS:  # 所有通道的凭据位都先占好，形状与所选通道无关
+        for spec in channels.CREDENTIALS.get(code, ()):
+            form[str(spec["env"]).lower()] = ""
     for key in NUMERIC_FIELDS:
         form[key] = str(cfg.get(key, watch.DEFAULT_CONFIG.get(key, "")))
     form["interval_minutes"] = str(cfg.get("interval_minutes", watch.DEFAULT_CONFIG["interval_minutes"]))
@@ -114,26 +123,37 @@ def config_from_form(form: dict) -> dict:
 
 
 def load_form(root: Path, config_path: Path | None = None) -> tuple[dict, str | None]:
-    """读盘得到表单值。配置文件坏了也不炸：显示默认值 + 一条提示。"""
+    """读盘得到表单值。配置文件坏了也不炸：显示默认值 + 一条提示。
+
+    凭据读**所有**通道（不只当前所选）：切通道或重新打开面板时，已配置的值不会
+    显示成空白；键一律是 env 键小写，与保存/脏状态比较共用同一套命名。
+    """
     notice: str | None = None
     try:
         cfg = settings.load(root, config_path)
     except (OSError, ValueError) as exc:
         cfg = dict(watch.DEFAULT_CONFIG)
         notice = i18n.t("zh", "panel.notice_load_failed", error=exc)  # 配置坏了，语言只能按默认
-    try:
-        secrets = settings.read_secrets(root)
-    except OSError as exc:  # 读 .env 出错不该让面板起不来
-        secrets = {"appid": "", "secret": "", "source": "", "error": str(exc)}
-    form = form_from_config(cfg, secrets)
-    # 所选通道的 .env 凭据填进表单（qq 走上面的 read_secrets 旧路，不重复读）。
-    code = channels.normalize_channel(cfg.get("channel"))
-    if code != "qq":
-        env_keys = [str(spec["env"]) for spec in channels.CREDENTIALS.get(code, ())]
+    form = form_from_config(cfg)
+    for code in channels.CHANNELS:
+        env_keys = channels.env_keys_of(code)
         values = qq_notify.read_env_values(env_keys, Path(root))
         for key in env_keys:
             form[key.lower()] = values.get(key, "")
     return form, notice
+
+
+def channel_secrets(form: dict, channel: str) -> dict[str, str]:
+    """表单 → 要写进 .env 的键值（只含所选通道的凭据）。
+
+    表单键与 env 键小写一一对应，保存与脏状态比较共用这一处；qq 的
+    QQBOT_APPID/QQBOT_SECRET 因此不需要另一套 appid/secret 命名。
+    """
+    code = channels.normalize_channel(channel)
+    return {
+        str(spec["env"]): str(form.get(str(spec["env"]).lower(), "") or "").strip()
+        for spec in channels.CREDENTIALS.get(code, ())
+    }
 
 
 def format_report(report, lang: str = "zh") -> str:  # noqa: ANN001 - watch.RoundReport
@@ -222,6 +242,12 @@ class Panel:
         self._repos: list[str] = []
         self._vars: dict[str, object] = {}
         self._notice = ""
+        # 脏状态：show() 时把 _collect() 存成基线，之后每秒比一次（见 _refresh_dirty）。
+        self._baseline: dict | None = None
+        self._dirty = False
+        self._wrap_labels: list[tuple[tk.Widget, int]] = []
+        self._wrap_width = 0
+        self._tick_id: str | None = None
         self._build()
 
     def _t(self, key: str, **kwargs: object) -> str:
@@ -236,6 +262,15 @@ class Panel:
         window.columnconfigure(0, weight=1)
         window.rowconfigure(2, weight=1)
         self._window = window
+
+        # 页签只有文字、没有内边距时很挤（截图反馈 #2）：只加 padding，不换主题/字号。
+        ttk.Style(window).configure("TNotebook.Tab", padding=(16, 6))
+
+        base_font = tkfont.nametofont("TkDefaultFont")
+        size = int(base_font.actual("size"))
+        # Windows 的勾选框随字体放大，没有单独的 indicator 尺寸选项（截图反馈 #6）。
+        # 负数字号表示像素，两个方向都 +2 才「更大」。
+        self._check_font = (base_font.actual("family"), size + 2 if size > 0 else size - 2)
 
         self._status_label = tk.Label(window, anchor="w", justify="left", fg="#0f172a", wraplength=740)
         self._status_label.grid(row=0, column=0, sticky="ew", padx=14, pady=(12, 0))
@@ -256,6 +291,8 @@ class Panel:
         buttons.grid(row=4, column=0, sticky="ew", padx=14, pady=10)
         tk.Button(buttons, text=self._t("panel.save"), width=9, command=self.save).pack(side="left")
         tk.Button(buttons, text=self._t("panel.cancel"), width=7, command=self.hide).pack(side="left", padx=(8, 0))
+        # 有改动但还没保存时的提示；干净时 pack_forget（见 _refresh_dirty）。
+        self._dirty_label = tk.Label(buttons, text=self._t("panel.unsaved"), fg="#b45309")
         tk.Button(buttons, text=self._t("panel.run_now_button"), command=lambda: self._trigger(dry_run=False)).pack(
             side="right"
         )
@@ -270,12 +307,53 @@ class Panel:
         self._log_visible = False
         self._tick()
 
-        # 让窗口按内容定尺寸：写死 780x620 在别的字体/DPI 下会切掉右边一截。
+        for label, pad in (
+            (self._status_label, 28),
+            (self._notice_label, 28),
+            (self._error_label, 28),
+        ):
+            self._track_wrap(label, pad)
+
+        # 让窗口按内容定尺寸：写死尺寸在别的字体/DPI 下会切掉右边一截。截图反馈 #4：
+        # 状态行存在时下面会被压缩，所以默认更高，并把说明文字按窗口宽度换行。
         window.update_idletasks()
-        width = max(760, window.winfo_reqwidth())
-        height = max(600, window.winfo_reqheight())
+        screen_width = max(640, window.winfo_screenwidth() - 80)
+        screen_height = max(560, window.winfo_screenheight() - 120)
+        width = min(max(900, window.winfo_reqwidth()), screen_width)
+        self._apply_wrap(width)
+        window.update_idletasks()
+        height = min(max(700, window.winfo_reqheight()), screen_height)
         window.geometry(f"{width}x{height}")
-        window.minsize(min(width, 680), min(height, 520))
+        window.minsize(min(760, width), min(620, height))
+        window.bind("<Configure>", self._on_configure)
+
+    def _track_wrap(self, label: tk.Widget, pad: int) -> None:
+        """登记「按窗口宽度换行」的标签；pad 是左右内边距的合计。"""
+        self._wrap_labels.append((label, pad))
+
+    def _apply_wrap(self, width: int) -> None:
+        self._wrap_width = width
+        for label, pad in self._wrap_labels:
+            label.config(wraplength=max(320, width - pad))
+
+    def _on_configure(self, event: tk.Event) -> None:
+        if event.widget is self._window and int(event.width) != self._wrap_width:
+            self._apply_wrap(int(event.width))
+
+    def _checkbox(self, parent: tk.Widget, text: str, variable: tk.Variable, row: int) -> tk.Checkbutton:
+        """放大版复选框：字体 +2 号让 Windows 的勾选框跟着变大，再补一点内边距。"""
+        button = tk.Checkbutton(
+            parent,
+            text=text,
+            variable=variable,
+            anchor="w",
+            font=self._check_font,
+            cursor="hand2",
+            padx=2,
+            pady=4,
+        )
+        button.grid(row=row, column=1, sticky="w", pady=(8, 2))
+        return button
 
     def _build_repos_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent)
@@ -284,7 +362,7 @@ class Panel:
         body.pack(fill="both", expand=True, padx=12)
         scroll = tk.Scrollbar(body)
         scroll.pack(side="right", fill="y")
-        listing = tk.Listbox(body, height=10, yscrollcommand=scroll.set, selectmode="extended", activestyle="none")
+        listing = tk.Listbox(body, height=12, yscrollcommand=scroll.set, selectmode="extended", activestyle="none")
         listing.pack(side="left", fill="both", expand=True)
         scroll.config(command=listing.yview)
         self._repo_list = listing
@@ -305,16 +383,15 @@ class Panel:
         tk.Button(actions, text=self._t("panel.down"), width=7, command=lambda: self.move_selected(1)).pack(
             side="left", padx=(8, 0)
         )
-        tk.Label(actions, text=self._t("panel.repos_hint"), fg="#64748b").pack(side="right")
         return frame
 
     def _build_notify_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent)
         frame.columnconfigure(1, weight=1)
         self._vars["notify"] = tk.BooleanVar(value=True)
-        # qq 的三个字段单独建变量：其它通道的字段随 _render_channel_fields 按需建。
-        for var in ("openid", "appid", "secret"):
-            self._vars.setdefault(var, tk.StringVar())
+        # openid 是 config 键；qq 的凭据变量随 _render_channel_fields 按需建
+        # （名字 = env 键小写，见 form_from_config 的注释）。
+        self._vars.setdefault("openid", tk.StringVar())
 
         # 通道下拉：显示人话、落盘代码 —— 与语言下拉同一套双向映射。
         self._vars["channel"] = tk.StringVar()
@@ -337,15 +414,15 @@ class Panel:
         self._channel_body = tk.Frame(frame)
         self._channel_body.grid(row=1, column=0, columnspan=2, sticky="ew")
 
-        tk.Checkbutton(frame, text=self._t("panel.notify_label"), variable=self._vars["notify"]).grid(
-            row=2, column=1, sticky="w", pady=(14, 2)
-        )
+        self._checkbox(frame, self._t("panel.notify_label"), self._vars["notify"], row=2)
 
         self._env_hint = tk.Label(frame, anchor="w", justify="left", fg="#64748b", wraplength=820)
         self._env_hint.grid(row=3, column=1, sticky="w", pady=(8, 0))
         # 「凭据来源」行：随通道显示现在用的凭据从哪读来的（环境变量 / 某个 .env）。
         self._secret_hint = tk.Label(frame, anchor="w", justify="left", fg="#475569", wraplength=820)
         self._secret_hint.grid(row=4, column=1, sticky="w", pady=(6, 0))
+        self._track_wrap(self._env_hint, 200)
+        self._track_wrap(self._secret_hint, 200)
         return frame
 
     def _render_channel_fields(self) -> None:
@@ -399,9 +476,7 @@ class Panel:
         self._field(
             frame, 0, self._t("panel.field_interval"), tk.Entry, textvariable=self._vars["interval_minutes"], width=8, wide=False
         )
-        tk.Checkbutton(frame, text=self._t("panel.autostart_label"), variable=self._vars["autostart"]).grid(
-            row=1, column=1, sticky="w", pady=(12, 2)
-        )
+        self._checkbox(frame, self._t("panel.autostart_label"), self._vars["autostart"], row=1)
         self._field(
             frame,
             2,
@@ -415,6 +490,7 @@ class Panel:
         )
         self._task_label = tk.Label(frame, anchor="w", justify="left", fg="#475569", wraplength=820)
         self._task_label.grid(row=3, column=1, sticky="w", pady=(10, 0))
+        self._track_wrap(self._task_label, 200)
         self.set_task_hint(self._task_hint)
         return frame
 
@@ -477,17 +553,17 @@ class Panel:
     def _fill(self, form: dict, notice: str | None) -> None:
         self._repos = list(form["repos"])
         self._refresh_repos()
-        for key in ("openid", "appid", "secret", "interval_minutes", "git_ssl_backend"):
+        for key in ("openid", "interval_minutes", "git_ssl_backend"):
             self._vars[key].set(form.get(key, ""))
         channel = channels.normalize_channel(form.get("channel"))
         self._vars["channel"].set(self._channel_display.get(channel, channel))
-        # 所有通道的凭据变量都建好：表单里没出现的通道先空着，切过去时已输入的值不丢。
+        # 所有通道的凭据变量都建好并填上现有值：切通道时看到的是「已配置」的值，
+        # 而不是空白（这个空白曾让人以为 .env 没被读到）。表单里没有的键留空。
         for code in channels.CHANNELS:
             for spec in channels.CREDENTIALS.get(code, ()):
                 var = str(spec["env"]).lower()
                 self._vars.setdefault(var, tk.StringVar())
-                if var in form:
-                    self._vars[var].set(form.get(var, ""))
+                self._vars[var].set(form.get(var, ""))
         self._vars["notify"].set(bool(form.get("notify", True)))
         self._vars["autostart"].set(bool(form.get("autostart", True)))
         language = i18n.normalize_language(form.get("language"))
@@ -516,6 +592,13 @@ class Panel:
         }
         for key in ("interval_minutes", *NUMERIC_FIELDS):
             form[key] = self._vars[key].get()
+        # 凭据也进快照（键是 env 键小写）：否则改了 AppID/AppSecret 不会被判成
+        # 「未保存」。config_from_form() 只挑配置键，所以它们不会进 config.json。
+        for code in channels.CHANNELS:
+            for spec in channels.CREDENTIALS.get(code, ()):
+                key = str(spec["env"]).lower()
+                var = self._vars.get(key)
+                form[key] = var.get() if hasattr(var, "get") else ""
         return form
 
     def _refresh_repos(self) -> None:
@@ -551,7 +634,8 @@ class Panel:
         self._repo_list.selection_set(target)
 
     def save(self) -> None:
-        values = config_from_form(self._collect())
+        form = self._collect()
+        values = config_from_form(form)
         # 校验报错用表单里新选的语言：正在切语言的人用目标语言看报错。
         errors = settings.validate(values, lang=i18n.normalize_language(values.get("language")))
         if errors:
@@ -559,16 +643,7 @@ class Panel:
             return
         # 所选通道的凭据 → .env：键名来自 channels.CREDENTIALS（openid 是 config 键，走上面）。
         code = channels.normalize_channel(values.get("channel"))
-        if code == "qq":
-            secrets = {
-                "QQBOT_APPID": str(self._vars["appid"].get()),
-                "QQBOT_SECRET": str(self._vars["secret"].get()),
-            }
-        else:
-            secrets = {
-                str(spec["env"]): str(self._vars[str(spec["env"]).lower()].get())
-                for spec in channels.CREDENTIALS.get(code, ())
-            }
+        secrets = channel_secrets(form, code)
         try:
             settings.save_config(self._config_path, values)
             settings.save_secrets(self._root_dir, secrets)
@@ -577,6 +652,8 @@ class Panel:
             return
         self._error_label.config(text="")
         self._set_notice(self._t("panel.notice_saved", path=self._config_path))
+        self._baseline = self._collect()
+        self._refresh_dirty()
         self._on_saved(values)
 
     def _trigger(self, dry_run: bool) -> None:
@@ -625,14 +702,51 @@ class Panel:
             self._task_label.config(text=text)
 
     def _tick(self) -> None:
-        """每秒刷新状态行（调度器状态在别的线程里变）。"""
+        """每秒刷新状态行（调度器状态在别的线程里变）与未保存标记。"""
+        if self._window is None:  # 面板已销毁（换语言会重建）：别再碰死控件
+            return
         try:
             self._status_label.config(text=self._get_status())
-        except RuntimeError:  # pragma: no cover - 窗口已销毁
+            self._refresh_dirty()
+        except (RuntimeError, tk.TclError):  # pragma: no cover - 窗口已销毁
             return
-        self._tk_root.after(1000, self._tick)
+        self._tick_id = self._tk_root.after(1000, self._tick)
+
+    # -- 未保存状态 ----------------------------------------------------
+    def is_dirty(self) -> bool:
+        """表单与打开时/上次保存后的快照是否不同（凭据也算，见 _collect）。"""
+        return self._baseline is not None and self._collect() != self._baseline
+
+    def _refresh_dirty(self) -> None:
+        dirty = self.is_dirty()
+        if dirty == self._dirty:
+            return
+        self._dirty = dirty
+        if dirty:
+            self._dirty_label.pack(side="left", padx=(12, 0))
+        else:
+            self._dirty_label.pack_forget()
+
+    def confirm_discard(self) -> bool:
+        """有未保存修改时问一句；干净/窗口不在时直接放行。"""
+        if not self.is_dirty() or self._window is None:
+            return True
+        return bool(
+            messagebox.askyesno(
+                self._t("panel.unsaved_title"),
+                self._t("panel.unsaved_close"),
+                parent=self._window,
+            )
+        )
 
     def show(self) -> None:
+        window = self._window
+        if window is None:  # pragma: no cover - 构造时一定会有窗口
+            return
+        if self.visible and self.is_dirty():
+            # 托盘再次「打开设置」不该把正在编辑的表单重读掉。
+            self._raise_window(window)
+            return
         form, notice = load_form(self._root_dir, self._config_path)
         self._fill(form, notice)
         # ENV_SOURCE 是「凭据来自环境变量」的哨兵，翻成当前语言；文件路径是数据，原样。
@@ -644,9 +758,11 @@ class Panel:
         self._secret_hint.config(text=self._t("panel.cred_source", source=source))
         if not git_available():
             self._set_notice(self._t("panel.notice_no_git"))
-        window = self._window
-        if window is None:  # pragma: no cover - 构造时一定会有窗口
-            return
+        self._baseline = self._collect()
+        self._refresh_dirty()
+        self._raise_window(window)
+
+    def _raise_window(self, window: tk.Toplevel) -> None:
         window.deiconify()
         window.lift()
         window.attributes("-topmost", True)
@@ -654,10 +770,16 @@ class Panel:
         window.focus_force()
 
     def hide(self) -> None:
+        if not self.confirm_discard():
+            return
         if self._window is not None:
             self._window.withdraw()
 
     def destroy(self) -> None:
+        if self._tick_id is not None:
+            with contextlib.suppress(tk.TclError):
+                self._tk_root.after_cancel(self._tick_id)
+            self._tick_id = None
         if self._window is not None:
             self._window.destroy()
             self._window = None
