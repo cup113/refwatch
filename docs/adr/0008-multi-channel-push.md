@@ -42,7 +42,17 @@ ADR-0004 落地时把「送出去」收敛成 `watch.py` 里的 `deliver(text, c
 - QQ 行为不变：`channel` 缺省即旧路径，openid/token 语义只是换了个落点。
 - 加通道 = 一个 `_prepare_*` 函数 + `CREDENTIALS` 一行 + i18n 两个语言各三四个键；
   `test_channels` 的注册表测试会逼着面板标签跟上。
-- 各通道端点与上限以官方文档为准核对过（wecom 2048 字节、钉钉/飞书 20 条/分钟、
-  Server酱免费 5 条/天）；超限的再分片是适配器自己的事，不传染 `check_repo`。
+- **端点与上限按「检索片段 + 社区 SDK」核对，不是逐条查过官方文档**：WeCom/钉钉的官方
+  文档页是 JS 渲染的（抓取只得到空壳），wecom 2048 字节、钉钉/飞书 20 条/分钟、Server酱
+  免费 5 条/天这些数字来自检索片段与惯例；飞书签名公式取自第三方 SDK 文档（与官方描述
+  一致）。**首批五通道均未做真实端到端联调** —— `test_channels` 只断言 URL/payload/签名
+  的**构造**，服务端是否接受，要在配好凭据后用 `python channels.py --channel <name> "测试"`
+  各发一条确认；探针只能证明「端点存在且拒绝假凭据」，证明不了「消息能到」。
+  2026-10-24 探针实测（假凭据各打 1 次，重放的是适配器实际构造的请求）：五个端点都返回
+  应用级错误码而非 404/HTML —— wecom `93000 invalid webhook url`、钉钉 `300005 token is
+  not exist`（加签参数被接受）、飞书 `19001 access token invalid`（timestamp/sign 随行）、
+  Server酱 `10003`、Bark `400 failed to get [key] device token`（`device_key` 字段被点名）。
+  URL、方法、payload 形状因此确认；**投递**仍待真实凭据联调。
+- 超限的再分片是适配器自己的事，不传染 `check_repo`。
 - 新根级模块 `channels.py` 必须进 `install.ps1` 的 `$programFiles`（源码部署唯一清单），
   `tests/test_deploy_manifest.py` 守着。
