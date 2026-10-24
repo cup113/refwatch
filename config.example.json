@@ -11,6 +11,7 @@
   "max_chunks_per_repo": 2,
   "chunk_limit": 4500,
   "openid": "",
+  "channel": "qq",
   "notify": true,
   "fetch_timeout_sec": 300,
   "fail_alert_threshold": 3,

@@ -60,6 +60,14 @@ class FormRoundTripTest(unittest.TestCase):
             panel.config_from_form({"language": "klingon"})["language"], "zh", "非法语言回退 zh"
         )
 
+    def test_channel_round_trips_and_invalid_falls_back(self) -> None:
+        form = panel.form_from_config(self.cfg(channel="wecom"))
+        self.assertEqual(form["channel"], "wecom")
+        self.assertEqual(panel.config_from_form(form)["channel"], "wecom")
+        self.assertEqual(
+            panel.config_from_form({"channel": "icq"})["channel"], "qq", "非法通道回退 qq"
+        )
+
     def test_config_to_form_then_back_is_stable(self) -> None:
         cfg = self.cfg(interval_minutes=7, notify=False, autostart=True)
         form = panel.form_from_config(cfg, {"appid": "id", "secret": "s", "source": "x"})

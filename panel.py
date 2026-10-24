@@ -21,6 +21,7 @@ from typing import Callable
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
+import channels  # noqa: E402
 import i18n  # noqa: E402
 import qq_notify  # noqa: E402
 import settings  # noqa: E402
@@ -56,8 +57,8 @@ _STATUS_KEYS = {
     "ok": "panel.status_ok",
     "dry-run": "panel.status_dry_run",
     "not-sent": "panel.status_not_sent",
-    "no-openid": "panel.status_no_openid",
-    "token-failed": "panel.status_token_failed",
+    "no-recipient": "panel.status_no_recipient",
+    "setup-failed": "panel.status_setup_failed",
     "no-repos": "panel.status_no_repos",
 }
 
@@ -70,6 +71,7 @@ def form_from_config(cfg: dict, secrets: dict | None = None) -> dict:
     found = secrets or {"appid": "", "secret": "", "source": ""}
     form: dict = {
         "repos": list(cfg.get("repos") or []),
+        "channel": channels.normalize_channel(cfg.get("channel")),
         "openid": str(cfg.get("openid") or ""),
         "appid": str(found.get("appid") or ""),
         "secret": str(found.get("secret") or ""),
@@ -93,6 +95,7 @@ def config_from_form(form: dict) -> dict:
     """
     values: dict = {
         "repos": settings.normalize_repos(form.get("repos", [])),
+        "channel": channels.normalize_channel(form.get("channel")),
         "openid": str(form.get("openid", "")).strip(),
         "notify": bool(form.get("notify", True)),
         "autostart": bool(form.get("autostart", True)),
@@ -122,7 +125,15 @@ def load_form(root: Path, config_path: Path | None = None) -> tuple[dict, str | 
         secrets = settings.read_secrets(root)
     except OSError as exc:  # 读 .env 出错不该让面板起不来
         secrets = {"appid": "", "secret": "", "source": "", "error": str(exc)}
-    return form_from_config(cfg, secrets), notice
+    form = form_from_config(cfg, secrets)
+    # 所选通道的 .env 凭据填进表单（qq 走上面的 read_secrets 旧路，不重复读）。
+    code = channels.normalize_channel(cfg.get("channel"))
+    if code != "qq":
+        env_keys = [str(spec["env"]) for spec in channels.CREDENTIALS.get(code, ())]
+        values = qq_notify.read_env_values(env_keys, Path(root))
+        for key in env_keys:
+            form[key.lower()] = values.get(key, "")
+    return form, notice
 
 
 def format_report(report, lang: str = "zh") -> str:  # noqa: ANN001 - watch.RoundReport
@@ -232,6 +243,7 @@ class Panel:
 
         notebook = ttk.Notebook(window)
         notebook.grid(row=2, column=0, sticky="nsew", padx=14, pady=(10, 0))
+        self._notebook = notebook
         notebook.add(self._build_repos_tab(notebook), text=self._t("panel.tab_repos"))
         notebook.add(self._build_notify_tab(notebook), text=self._t("panel.tab_notify"))
         notebook.add(self._build_schedule_tab(notebook), text=self._t("panel.tab_schedule"))
@@ -299,41 +311,84 @@ class Panel:
     def _build_notify_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent)
         frame.columnconfigure(1, weight=1)
-        self._vars["openid"] = tk.StringVar()
-        self._vars["appid"] = tk.StringVar()
-        self._vars["secret"] = tk.StringVar()
         self._vars["notify"] = tk.BooleanVar(value=True)
+        # qq 的三个字段单独建变量：其它通道的字段随 _render_channel_fields 按需建。
+        for var in ("openid", "appid", "secret"):
+            self._vars.setdefault(var, tk.StringVar())
 
-        self._field(frame, 0, self._t("panel.field_openid"), tk.Entry, textvariable=self._vars["openid"])
-        self._field(frame, 1, self._t("panel.field_appid"), tk.Entry, textvariable=self._vars["appid"])
+        # 通道下拉：显示人话、落盘代码 —— 与语言下拉同一套双向映射。
+        self._vars["channel"] = tk.StringVar()
+        self._channel_display = {code: self._t(f"channel.{code}") for code in channels.CHANNELS}
+        self._channel_codes = {display: code for code, display in self._channel_display.items()}
+        box = self._field(
+            frame,
+            0,
+            self._t("panel.field_channel"),
+            ttk.Combobox,
+            textvariable=self._vars["channel"],
+            values=list(self._channel_display.values()),
+            width=24,
+            state="readonly",
+            wide=False,
+        )
+        box.bind("<<ComboboxSelected>>", lambda _event: self._render_channel_fields())
 
-        def secret_row(holder: tk.Widget) -> tk.Widget:
-            row = tk.Frame(holder)
-            entry = tk.Entry(row, textvariable=self._vars["secret"], show="*")
-            entry.pack(side="left", fill="x", expand=True)
-            self._secret_entry = entry
-            tk.Button(row, text=self._t("panel.show"), width=6, command=self._toggle_secret).pack(
-                side="left", padx=(8, 0)
-            )
-            return row
-
-        self._field(frame, 2, self._t("panel.field_secret"), secret_row)
+        # 动态凭据行：值都在 _vars 里，切通道只重建 widget，不丢输入。
+        self._channel_body = tk.Frame(frame)
+        self._channel_body.grid(row=1, column=0, columnspan=2, sticky="ew")
 
         tk.Checkbutton(frame, text=self._t("panel.notify_label"), variable=self._vars["notify"]).grid(
-            row=3, column=1, sticky="w", pady=(14, 2)
+            row=2, column=1, sticky="w", pady=(14, 2)
         )
 
+        self._env_hint = tk.Label(frame, anchor="w", justify="left", fg="#64748b", wraplength=820)
+        self._env_hint.grid(row=3, column=1, sticky="w", pady=(8, 0))
+        # 「凭据来源」行：随通道显示现在用的凭据从哪读来的（环境变量 / 某个 .env）。
         self._secret_hint = tk.Label(frame, anchor="w", justify="left", fg="#475569", wraplength=820)
         self._secret_hint.grid(row=4, column=1, sticky="w", pady=(6, 0))
-        tk.Label(
-            frame,
-            anchor="w",
-            justify="left",
-            fg="#64748b",
-            wraplength=820,
-            text=self._t("panel.secrets_hint"),
-        ).grid(row=5, column=1, sticky="w", pady=(6, 0))
         return frame
+
+    def _render_channel_fields(self) -> None:
+        """按当前所选通道重建凭据行（含 qq 的 openid 行 —— 它是 config 键，不是凭据）。"""
+        code = self._channel_codes.get(self._vars["channel"].get(), "qq")
+        for child in self._channel_body.winfo_children():
+            child.destroy()
+        self._channel_body.columnconfigure(1, weight=1)
+        row = 0
+        if code == "qq":
+            self._field(
+                self._channel_body, row, self._t("panel.field_openid"), tk.Entry,
+                textvariable=self._vars["openid"],
+            )
+            row += 1
+        for spec in channels.CREDENTIALS.get(code, ()):
+            env_key = str(spec["env"])
+            self._vars.setdefault(env_key.lower(), tk.StringVar())
+            label = self._t(str(spec["label"]))
+            if spec["masked"]:
+
+                def masked_row(holder: tk.Widget, var: str = env_key.lower()) -> tk.Widget:
+                    inner = tk.Frame(holder)
+                    entry = tk.Entry(inner, textvariable=self._vars[var], show="*")
+                    entry.pack(side="left", fill="x", expand=True)
+                    tk.Button(
+                        inner,
+                        text=self._t("panel.show"),
+                        width=6,
+                        command=lambda e=entry: e.config(show="" if e.cget("show") else "*"),
+                    ).pack(side="left", padx=(8, 0))
+                    return inner
+
+                self._field(self._channel_body, row, label, masked_row)
+            else:
+                self._field(
+                    self._channel_body, row, label, tk.Entry,
+                    textvariable=self._vars[env_key.lower()],
+                )
+            row += 1
+        env_keys = " / ".join(str(spec["env"]) for spec in channels.CREDENTIALS.get(code, ()))
+        self._env_hint.config(text=self._t("panel.channel_env_hint", keys=env_keys))
+        self._secret_hint.grid()  # 内容随通道由 show() 刷新；这里只确保它可见
 
     def _build_schedule_tab(self, parent: tk.Widget) -> tk.Widget:
         frame = tk.Frame(parent)
@@ -424,6 +479,15 @@ class Panel:
         self._refresh_repos()
         for key in ("openid", "appid", "secret", "interval_minutes", "git_ssl_backend"):
             self._vars[key].set(form.get(key, ""))
+        channel = channels.normalize_channel(form.get("channel"))
+        self._vars["channel"].set(self._channel_display.get(channel, channel))
+        # 所有通道的凭据变量都建好：表单里没出现的通道先空着，切过去时已输入的值不丢。
+        for code in channels.CHANNELS:
+            for spec in channels.CREDENTIALS.get(code, ()):
+                var = str(spec["env"]).lower()
+                self._vars.setdefault(var, tk.StringVar())
+                if var in form:
+                    self._vars[var].set(form.get(var, ""))
         self._vars["notify"].set(bool(form.get("notify", True)))
         self._vars["autostart"].set(bool(form.get("autostart", True)))
         language = i18n.normalize_language(form.get("language"))
@@ -434,12 +498,15 @@ class Panel:
         self._patterns.insert("1.0", "\n".join(form.get("exclude_ref_patterns", [])))
         self._error_label.config(text="")
         self._set_notice(notice or "")
+        self._render_channel_fields()
 
     def _collect(self) -> dict:
-        # 语言选择框显示的是人话；不认识的显示值按原样交给 normalize 兜底。
+        # 语言/通道选择框显示的是人话；不认识的显示值按原样交给 normalize 兜底。
         language_display = str(self._vars["language"].get())
+        channel_display = str(self._vars["channel"].get())
         form = {
             "repos": list(self._repos),
+            "channel": self._channel_codes.get(channel_display, channel_display),
             "openid": self._vars["openid"].get(),
             "notify": bool(self._vars["notify"].get()),
             "autostart": bool(self._vars["autostart"].get()),
@@ -483,9 +550,6 @@ class Panel:
         self._refresh_repos()
         self._repo_list.selection_set(target)
 
-    def _toggle_secret(self) -> None:
-        self._secret_entry.config(show="" if self._secret_entry.cget("show") else "*")
-
     def save(self) -> None:
         values = config_from_form(self._collect())
         # 校验报错用表单里新选的语言：正在切语言的人用目标语言看报错。
@@ -493,11 +557,21 @@ class Panel:
         if errors:
             self._error_label.config(text="\n".join(errors[:6]))
             return
+        # 所选通道的凭据 → .env：键名来自 channels.CREDENTIALS（openid 是 config 键，走上面）。
+        code = channels.normalize_channel(values.get("channel"))
+        if code == "qq":
+            secrets = {
+                "QQBOT_APPID": str(self._vars["appid"].get()),
+                "QQBOT_SECRET": str(self._vars["secret"].get()),
+            }
+        else:
+            secrets = {
+                str(spec["env"]): str(self._vars[str(spec["env"]).lower()].get())
+                for spec in channels.CREDENTIALS.get(code, ())
+            }
         try:
             settings.save_config(self._config_path, values)
-            settings.save_secrets(
-                self._root_dir, str(self._vars["appid"].get()), str(self._vars["secret"].get())
-            )
+            settings.save_secrets(self._root_dir, secrets)
         except OSError as exc:
             self._error_label.config(text=self._t("panel.notice_save_failed", error=exc))
             return
@@ -562,7 +636,7 @@ class Panel:
         form, notice = load_form(self._root_dir, self._config_path)
         self._fill(form, notice)
         # ENV_SOURCE 是「凭据来自环境变量」的哨兵，翻成当前语言；文件路径是数据，原样。
-        source = settings.read_secrets(self._root_dir).get("source")
+        source = settings.read_secrets(self._root_dir, channels.normalize_channel(form.get("channel"))).get("source")
         if source == qq_notify.ENV_SOURCE:
             source = self._t("panel.cred_from_env")
         elif not source:

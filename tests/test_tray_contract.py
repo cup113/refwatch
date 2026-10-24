@@ -171,6 +171,18 @@ class EventAndLogTest(unittest.TestCase):
         self.assertNotIn("abc.def", cleaned)
         self.assertIn("QQBOT_SECRET=***", cleaned)
 
+    def test_channel_credentials_are_redacted(self) -> None:
+        """多通道凭据与 QQ 同级：webhook/SendKey 持有者就能骚扰你，崩溃日志必须打码。"""
+        text = (
+            "WECOM_WEBHOOK=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wh-secret\n"
+            "DINGTALK_SECRET=SEC123\nSERVERCHAN_SENDKEY=SCTkey456\nBARK_KEY=bark789\n"
+            "feishu_webhook: https://open.feishu.cn/open-apis/bot/v2/hook/hk1\n"
+        )
+        cleaned = tray.redact(text)
+        for secret in ("wh-secret", "SEC123", "SCTkey456", "bark789", "hk1"):
+            self.assertNotIn(secret, cleaned, secret)
+        self.assertIn("WECOM_WEBHOOK=***", cleaned)
+
     def test_crash_log_is_written_redacted(self) -> None:
         root = temp_root()
         self.addCleanup(rmtree, root)

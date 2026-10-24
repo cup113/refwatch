@@ -64,6 +64,39 @@ class CredentialsTest(unittest.TestCase):
                 qq_notify.load_credentials(self.root)
 
 
+class EnvValuesTest(unittest.TestCase):
+    """read_env_values：多通道凭据的批量读取器，优先级与 QQ 凭据一致。"""
+
+    def setUp(self) -> None:
+        self.root = temp_root()
+        self.dsh = temp_root()
+        self.addCleanup(rmtree, self.root)
+        self.addCleanup(rmtree, self.dsh)
+
+    def test_env_wins_then_file_then_empty(self) -> None:
+        (self.root / ".env").write_text(
+            "WECOM_WEBHOOK=file-url\nBARK_KEY=file-key\n", encoding="utf-8"
+        )
+        quiet = {
+            "WECOM_WEBHOOK": "env-url",
+            "BARK_KEY": "",
+            "FEISHU_WEBHOOK": "",
+            "DSH_HOME": str(self.dsh),
+        }
+        with mock.patch.dict(os.environ, quiet):
+            values = qq_notify.read_env_values(
+                ["WECOM_WEBHOOK", "BARK_KEY", "FEISHU_WEBHOOK"], self.root
+            )
+        self.assertEqual(values["WECOM_WEBHOOK"], "env-url", "环境变量优先")
+        self.assertEqual(values["BARK_KEY"], "file-key", "缺的键回 .env 补")
+        self.assertEqual(values["FEISHU_WEBHOOK"], "", "都没有就是空串，不抛")
+
+    def test_keys_are_returned_as_given(self) -> None:
+        with mock.patch.dict(os.environ, {"DSH_HOME": str(self.dsh)}):
+            values = qq_notify.read_env_values(["BARK_SERVER"], self.root)
+        self.assertEqual(list(values), ["BARK_SERVER"])
+
+
 class OpenIdTest(unittest.TestCase):
     def test_no_default_openid_in_module(self) -> None:
         """openid 属于配置，代码里不该留任何默认值。"""

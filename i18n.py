@@ -44,6 +44,9 @@ STRINGS: dict[str, dict[str, str]] = {
         # ---- 日志行（logs/*.log 与 stdout） ------------------------
         "log.config_legacy_name": "配置文件用的是旧名字 {name}，建议改名为 config.json（下个版本不再支持）",
         "log.language_invalid": "language 配置值 {value} 不合法（只能是 zh/en），已按 zh 处理",
+        "log.channel_invalid": (
+            "channel 配置值 {value} 不合法（只能是 qq/wecom/dingtalk/feishu/serverchan/bark），已按 qq 处理"
+        ),
         "log.git_timeout": "git {args} 超时 ({timeout}s)",
         "log.baseline_first": "{slug}: 首次建立基线，记录 {count} 个 ref（静默，不通知）",
         "log.baseline_missing": "{slug}: 尚无基线，本轮静默建立（{count} 个 ref）",
@@ -54,8 +57,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "log.check_failed": "{slug}: 检查失败（连续 {count} 次）: {error}",
         "log.round_pending": "本轮结束：{repos} 个仓库，{failures} 个失败，{pending} 条待发（未发送）",
         "log.round_quiet": "本轮结束：{repos} 个仓库，无变化",
-        "log.no_openid": "配置里没有 openid（或环境变量 QQBOT_OPENID），本轮消息未发送",
-        "log.token_failed": "取 QQ access_token 失败，本轮消息未发送: {error}",
+        "log.no_recipient": "接收方/凭据未配置，本轮消息未发送: {error}",
+        "log.setup_failed": "推送通道准备失败，本轮消息未发送: {error}",
         "log.sent_chars": "已推送 {chars} 字",
         "log.send_failed": "推送失败: {error}",
         "log.round_done": "本轮结束：{repos} 个仓库，{failures} 个失败，推送 {sent}/{total} 条",
@@ -135,10 +138,25 @@ STRINGS: dict[str, dict[str, str]] = {
         "panel.field_appid": "机器人 AppID",
         "panel.field_secret": "机器人 AppSecret",
         "panel.show": "显示",
-        "panel.notify_label": "启用 QQ 推送（关闭 = 只记录状态，从不发送）",
-        "panel.secrets_hint": (
-            "凭据写在数据目录的 .env 里（QQBOT_APPID / QQBOT_SECRET），环境变量优先；"
-            "这里的值不会进 config.json。"
+        # ---- 推送通道（channels.CHANNELS 的注册表驱动 UI） --------
+        "panel.field_channel": "推送通道",
+        "channel.qq": "QQ 官方机器人",
+        "channel.wecom": "企业微信群机器人",
+        "channel.dingtalk": "钉钉群机器人",
+        "channel.feishu": "飞书群机器人",
+        "channel.serverchan": "Server酱（微信）",
+        "channel.bark": "Bark（iOS）",
+        "panel.field_wecom_webhook": "群机器人 Webhook 地址",
+        "panel.field_dingtalk_webhook": "群机器人 Webhook 地址",
+        "panel.field_dingtalk_secret": "加签密钥（可选）",
+        "panel.field_feishu_webhook": "群机器人 Webhook 地址",
+        "panel.field_feishu_secret": "签名密钥（可选）",
+        "panel.field_serverchan_sendkey": "SendKey",
+        "panel.field_bark_key": "设备 Key",
+        "panel.field_bark_server": "服务器（可选，默认官方）",
+        "panel.notify_label": "启用推送（关闭 = 只记录状态，从不发送）",
+        "panel.channel_env_hint": (
+            "凭据写在数据目录的 .env 里（{keys}），环境变量优先；这里的值不会进 config.json。"
         ),
         "panel.cred_source": "当前凭据来源：{source}",
         "panel.cred_from_env": "环境变量",
@@ -162,8 +180,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "panel.status_ok": "完成",
         "panel.status_dry_run": "预览完成（未发送、未推进基线）",
         "panel.status_not_sent": "完成（按设置没有发送）",
-        "panel.status_no_openid": "未发送：还没填 openid",
-        "panel.status_token_failed": "未发送：取 QQ access_token 失败",
+        "panel.status_no_recipient": "未发送：接收方/凭据未配置",
+        "panel.status_setup_failed": "未发送：推送通道准备失败",
         "panel.status_no_repos": "没配仓库",
         "panel.report_skip_lock": "跳过：上一轮仍在运行",
         "panel.report_repos": "{count} 个仓库",
@@ -184,6 +202,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "validate.bool": "{key} 必须是 true/false",
         "validate.openid_type": "openid 必须是字符串",
         "validate.language": "language 只能是 zh / en",
+        "validate.channel": "channel 只能是 qq / wecom / dingtalk / feishu / serverchan / bark",
         "validate.secret_conflict": "{key}（该值应导出为 .env，不是 config.json 的键）",
     },
     "en": {
@@ -210,6 +229,9 @@ STRINGS: dict[str, dict[str, str]] = {
         # ---- log lines (logs/*.log and stdout) ---------------------
         "log.config_legacy_name": "config file uses the legacy name {name}; rename it to config.json (support ends next release)",
         "log.language_invalid": "invalid language config value {value} (only zh/en); falling back to zh",
+        "log.channel_invalid": (
+            "invalid channel config value {value} (only qq/wecom/dingtalk/feishu/serverchan/bark); falling back to qq"
+        ),
         "log.git_timeout": "git {args} timed out ({timeout}s)",
         "log.baseline_first": "{slug}: initial baseline recorded, {count} refs (silent, no notification)",
         "log.baseline_missing": "{slug}: no baseline yet, recorded silently this round ({count} refs)",
@@ -220,8 +242,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "log.check_failed": "{slug}: check failed ({count} consecutive): {error}",
         "log.round_pending": "round done: {repos} repos, {failures} failed, {pending} messages pending (not sent)",
         "log.round_quiet": "round done: {repos} repos, no changes",
-        "log.no_openid": "no openid in config (or env QQBOT_OPENID); nothing sent this round",
-        "log.token_failed": "failed to get QQ access_token; nothing sent this round: {error}",
+        "log.no_recipient": "recipient/credentials not configured; nothing sent this round: {error}",
+        "log.setup_failed": "push channel setup failed; nothing sent this round: {error}",
         "log.sent_chars": "sent {chars} chars",
         "log.send_failed": "send failed: {error}",
         "log.round_done": "round done: {repos} repos, {failures} failed, sent {sent}/{total}",
@@ -301,9 +323,25 @@ STRINGS: dict[str, dict[str, str]] = {
         "panel.field_appid": "Bot AppID",
         "panel.field_secret": "Bot AppSecret",
         "panel.show": "Show",
-        "panel.notify_label": "Enable QQ push (off = record state only, never send)",
-        "panel.secrets_hint": (
-            "Credentials live in .env in the data directory (QQBOT_APPID / QQBOT_SECRET); "
+        # ---- push channels (UI driven by the channels.CHANNELS registry) --
+        "panel.field_channel": "Push channel",
+        "channel.qq": "QQ official bot",
+        "channel.wecom": "WeCom group bot",
+        "channel.dingtalk": "DingTalk group bot",
+        "channel.feishu": "Feishu group bot",
+        "channel.serverchan": "ServerChan (WeChat)",
+        "channel.bark": "Bark (iOS)",
+        "panel.field_wecom_webhook": "Group-bot webhook URL",
+        "panel.field_dingtalk_webhook": "Group-bot webhook URL",
+        "panel.field_dingtalk_secret": "Signing secret (optional)",
+        "panel.field_feishu_webhook": "Group-bot webhook URL",
+        "panel.field_feishu_secret": "Signing secret (optional)",
+        "panel.field_serverchan_sendkey": "SendKey",
+        "panel.field_bark_key": "Device key",
+        "panel.field_bark_server": "Server (optional; official default)",
+        "panel.notify_label": "Enable push (off = record state only, never send)",
+        "panel.channel_env_hint": (
+            "Credentials live in .env in the data directory ({keys}); "
             "environment variables win; these values never enter config.json."
         ),
         "panel.cred_source": "Credential source: {source}",
@@ -328,8 +366,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "panel.status_ok": "done",
         "panel.status_dry_run": "preview done (nothing sent, baseline kept)",
         "panel.status_not_sent": "done (sending disabled by settings)",
-        "panel.status_no_openid": "not sent: openid missing",
-        "panel.status_token_failed": "not sent: QQ access_token request failed",
+        "panel.status_no_recipient": "not sent: recipient/credentials not configured",
+        "panel.status_setup_failed": "not sent: push channel setup failed",
         "panel.status_no_repos": "no repositories configured",
         "panel.report_skip_lock": "skipped: previous round still running",
         "panel.report_repos": "{count} repos",
@@ -350,6 +388,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "validate.bool": "{key} must be true/false",
         "validate.openid_type": "openid must be a string",
         "validate.language": "language must be zh / en",
+        "validate.channel": "channel must be one of qq / wecom / dingtalk / feishu / serverchan / bark",
         "validate.secret_conflict": "{key} (belongs in .env, not a config.json key)",
     },
 }

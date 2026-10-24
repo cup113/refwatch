@@ -176,6 +176,19 @@ class ValidateTest(SettingsBase):
         errors = settings.validate({"repos": [], "QQBOT_SECRET": "s3cret"})
         self.assertTrue(any("QQBOT_SECRET" in message for message in errors), errors)
 
+    def test_channel_env_key_in_config_json_is_refused(self) -> None:
+        errors = settings.validate({"repos": [], "WECOM_WEBHOOK": "https://x"})
+        self.assertTrue(any("WECOM_WEBHOOK" in message for message in errors), errors)
+
+    def test_channel_must_be_a_known_one(self) -> None:
+        values = {"repos": [], "channel": "telegram"}
+        errors = settings.validate(values)
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("channel", errors[0])
+        accepted = {"repos": [], "channel": "wecom"}
+        self.assertEqual(settings.validate(accepted), [])
+        self.assertEqual(accepted["channel"], "wecom")
+
     def test_patterns_accept_a_multiline_string(self) -> None:
         values = {"repos": [], "exclude_ref_patterns": "refs/heads/ci/*\n\n refs/tags/nightly-* "}
         self.assertEqual(settings.validate(values), [])
@@ -204,14 +217,14 @@ class ValidateTest(SettingsBase):
 
 class SecretsTest(SettingsBase):
     def test_env_file_is_created_with_both_keys(self) -> None:
-        settings.save_secrets(self.root, "12345", "sesame")
+        settings.save_secrets(self.root, {"QQBOT_APPID": "12345", "QQBOT_SECRET": "sesame"})
         text = (self.root / ".env").read_text(encoding="utf-8")
         self.assertEqual(text, "QQBOT_APPID=12345\nQQBOT_SECRET=sesame\n")
 
     def test_other_lines_comments_and_crlf_are_kept(self) -> None:
         path = self.root / ".env"
         path.write_bytes(b"# header\r\nFOO=bar\r\nQQBOT_APPID=old\r\n\r\nQQBOT_SECRET=old\r\nTAIL=x\r\n")
-        settings.save_secrets(self.root, "new-id", "new-secret")
+        settings.save_secrets(self.root, {"QQBOT_APPID": "new-id", "QQBOT_SECRET": "new-secret"})
         data = path.read_bytes()
         self.assertNotIn(b"\n", data.replace(b"\r\n", b""), "原来是 CRLF，写回还得是 CRLF")
         text = data.decode("utf-8")
@@ -223,29 +236,50 @@ class SecretsTest(SettingsBase):
         self.assertNotIn("old", text)
 
     def test_no_bom_is_introduced(self) -> None:
-        settings.save_secrets(self.root, "id", "secret")
+        settings.save_secrets(self.root, {"QQBOT_APPID": "id", "QQBOT_SECRET": "secret"})
         self.assertFalse((self.root / ".env").read_bytes().startswith(b"\xef\xbb\xbf"))
 
     def test_duplicate_keys_collapse_to_one(self) -> None:
         path = self.root / ".env"
         path.write_text("QQBOT_APPID=one\nQQBOT_APPID=two\n", encoding="utf-8")
-        settings.save_secrets(self.root, "three", "s")
+        settings.save_secrets(self.root, {"QQBOT_APPID": "three"})
         text = path.read_text(encoding="utf-8")
         self.assertEqual(text.count("QQBOT_APPID="), 1)
         self.assertIn("QQBOT_APPID=three", text)
 
     def test_saved_secrets_are_read_back(self) -> None:
-        settings.save_secrets(self.root, "app-id", "app-secret")
+        settings.save_secrets(self.root, {"QQBOT_APPID": "app-id", "QQBOT_SECRET": "app-secret"})
         with mock.patch.dict(os.environ, self.quiet_env()):
             found = settings.read_secrets(self.root)
         self.assertEqual(found["appid"], "app-id")
         self.assertEqual(found["secret"], "app-secret")
         self.assertTrue(found["source"].endswith(".env"))
 
+    def test_channel_secrets_round_trip(self) -> None:
+        """wecom 的键走同一条 .env 手术路径：只动自己的行，QQ 的行原样保留。"""
+        path = self.root / ".env"
+        path.write_text("# c\nQQBOT_APPID=keep\n", encoding="utf-8")
+        settings.save_secrets(self.root, {"WECOM_WEBHOOK": "https://qyapi.example/send?key=k1"})
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("QQBOT_APPID=keep", text)
+        self.assertIn("WECOM_WEBHOOK=https://qyapi.example/send?key=k1", text)
+        quiet = dict(self.quiet_env(), WECOM_WEBHOOK="")
+        with mock.patch.dict(os.environ, quiet):
+            found = settings.read_secrets(self.root, "wecom")
+        self.assertEqual(found["wecom_webhook"], "https://qyapi.example/send?key=k1")
+        self.assertTrue(found["source"].endswith(".env"))
+
+    def test_read_secrets_env_source_wins_for_channel(self) -> None:
+        quiet = dict(self.quiet_env(), WECOM_WEBHOOK="https://env.example/send?key=env-key")
+        with mock.patch.dict(os.environ, quiet):
+            found = settings.read_secrets(self.root, "wecom")
+        self.assertEqual(found["wecom_webhook"], "https://env.example/send?key=env-key")
+        self.assertEqual(found["source"], "env")
+
     def test_secrets_never_land_in_config_json(self) -> None:
         path = self.root / "config.json"
         settings.save_config(path, {"repos": ["a/b"], "openid": "oid"})
-        settings.save_secrets(self.root, "app-id", "app-secret")
+        settings.save_secrets(self.root, {"QQBOT_APPID": "app-id", "QQBOT_SECRET": "app-secret"})
         self.assertNotIn("app-secret", path.read_text(encoding="utf-8"))
 
 

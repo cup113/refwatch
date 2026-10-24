@@ -63,7 +63,9 @@ _MB_TOPMOST = 0x00040000
 _IDYES = 6
 
 _SECRET_LINE = re.compile(
-    r"(?i)(?P<key>qqbot_appid|qqbot_secret|app_?secret|client_?secret|access_token|secret|token)"
+    r"(?i)(?P<key>qqbot_appid|qqbot_secret|wecom_webhook|dingtalk_webhook|dingtalk_secret"
+    r"|feishu_webhook|feishu_secret|serverchan_sendkey|bark_key|bark_server"
+    r"|app_?secret|client_?secret|access_token|secret|token)"
     r"(?P<sep>\s*[=:]\s*[\"']?)(?P<value>[^\s\"',}]+)"
 )
 # Authorization 头整行到行尾都是凭据（`QQBot <token>` 里带空格，单独处理）。

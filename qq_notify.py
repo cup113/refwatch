@@ -24,7 +24,9 @@ import json
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections.abc import Sequence
 from pathlib import Path
 
 TOKEN_URL = "https://api.bot.qq.com/app/getAppAccessToken"
@@ -50,7 +52,7 @@ def env_file_candidates(root: Path | None = None) -> list[Path]:
     return files
 
 
-def _read_env_file(path: Path) -> dict[str, str]:
+def read_env_file(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     if not path.is_file():
         return values
@@ -79,13 +81,32 @@ def read_credentials(root: Path | None = None) -> dict[str, str]:
     source = ENV_SOURCE if app_id and secret else ""
     if not app_id or not secret:
         for path in env_file_candidates(root):
-            values = _read_env_file(path)
+            values = read_env_file(path)
             app_id = app_id or values.get("QQBOT_APPID", "")
             secret = secret or values.get("QQBOT_SECRET", "")
             if app_id and secret:
                 source = str(path)
                 break
     return {"appid": app_id, "secret": secret, "source": source}
+
+
+def read_env_values(keys: Sequence[str], root: Path | None = None) -> dict[str, str]:
+    """按 keys 读一组配置值：环境变量优先，缺的再到 .env 候选里补。
+
+    多通道推送共用的读取器（面板按通道填表单 / 未来的适配器取凭据都走这里）。
+    返回的键集合与传入一致，找不到的是空串 —— 缺不缺由调用方判断。
+    """
+    values = {key: os.environ.get(key, "") for key in keys}
+    missing = [key for key in keys if not values[key]]
+    for path in env_file_candidates(root):
+        found = read_env_file(path)
+        for key in missing:
+            if not values[key] and found.get(key, ""):
+                values[key] = found[key]
+        missing = [key for key in keys if not values[key]]
+        if not missing:
+            break
+    return values
 
 
 def load_credentials(root: Path | None = None) -> tuple[str, str]:
@@ -100,23 +121,42 @@ def load_credentials(root: Path | None = None) -> tuple[str, str]:
     return app_id, secret
 
 
-def _post(url: str, payload: dict, headers: dict[str, str] | None = None) -> dict:
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+def post_json(
+    url: str,
+    payload: dict | None = None,
+    headers: dict[str, str] | None = None,
+    *,
+    form: dict | None = None,
+    hide_query_in_errors: bool = False,
+) -> dict:
+    """POST JSON（或 form= 时表单编码）。qq_notify 与多通道适配器共用这一个出口。
+
+    hide_query_in_errors：wecom/dingtalk 这类「密钥就在 URL 查询串里」的通道置 True，
+    报错信息里的 URL 只保留路径，不把 key=… 带进日志。HTTPError 的响应体原样保留
+    —— 那是「数据」（服务端说什么就是什么）。
+    """
+    if form is not None:
+        body = urllib.parse.urlencode(form).encode("utf-8")
+    else:
+        body = json.dumps(payload or {}, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, method="POST")
-    request.add_header("Content-Type", "application/json")
+    request.add_header(
+        "Content-Type", "application/x-www-form-urlencoded" if form is not None else "application/json"
+    )
     for key, value in (headers or {}).items():
         request.add_header(key, value)
+    shown = url.split("?", 1)[0] + "?***" if (hide_query_in_errors and "?" in url) else url
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")
-        raise RuntimeError(f"HTTP {exc.code} {url}: {detail}") from exc
+        raise RuntimeError(f"HTTP {exc.code} {shown}: {detail}") from exc
 
 
 def get_access_token(app_id: str, secret: str) -> str:
     """取 access_token。官方保证有效期内重复获取返回同一个值，不会踢掉别人的 token。"""
-    data = _post(TOKEN_URL, {"appId": app_id, "clientSecret": secret})
+    data = post_json(TOKEN_URL, {"appId": app_id, "clientSecret": secret})
     token = data.get("access_token")
     if not token:
         raise RuntimeError(f"access_token request failed: {data}")
@@ -126,7 +166,7 @@ def get_access_token(app_id: str, secret: str) -> str:
 def send_text(openid: str, content: str, token: str) -> dict:
     """主动消息（不带 msg_id）。"""
     url = f"{API_BASE}/v2/users/{openid}/messages"
-    data = _post(
+    data = post_json(
         url,
         {"content": content, "msg_type": 0},
         {"Authorization": f"QQBot {token}"},

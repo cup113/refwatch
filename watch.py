@@ -39,8 +39,9 @@ HERE = Path(__file__).resolve().parent
 # 推送器与监视器同目录（发布形态就是两个平铺文件）。
 sys.path.insert(0, str(HERE))
 
+import channels  # noqa: E402
 import i18n  # noqa: E402
-from qq_notify import chunk, get_access_token, load_credentials, send_text  # noqa: E402
+from qq_notify import chunk  # noqa: E402
 
 # pythonw.exe 没有控制台，而它 spawn 的 git.exe 是控制台子系统程序：没有这个标志，
 # Windows 会给每个 git 子进程新分配一个控制台窗口 —— 也就是计划任务每 30 分钟闪一下
@@ -65,6 +66,9 @@ DEFAULT_CONFIG: dict = {
     "max_chunks_per_repo": 2,
     "chunk_limit": 4500,
     "openid": "",
+    # 推送目的地（qq / wecom / dingtalk / feishu / serverchan / bark，见 channels.py）；
+    # 非法值回退 qq（同 language 的策略）。
+    "channel": "qq",
     "notify": True,
     "fetch_timeout_sec": 300,
     "fail_alert_threshold": 3,
@@ -103,6 +107,10 @@ def load_config(root: Path, config_path: Path | None) -> dict:
     if raw_language != cfg["language"]:
         # 值本身不合法，没有「它的语言」可言：用回退后的 zh 报这条 WARN。
         log(root, i18n.t("zh", "log.language_invalid", value=raw_language), "WARN")
+    raw_channel = cfg.get("channel")
+    cfg["channel"] = channels.normalize_channel(raw_channel)
+    if raw_channel != cfg["channel"]:
+        log(root, i18n.t("zh", "log.channel_invalid", value=raw_channel), "WARN")
     cfg["openid"] = str(cfg.get("openid") or os.environ.get("QQBOT_OPENID", ""))
     cfg["_root"] = root
     cfg["_config_path"] = path
@@ -446,15 +454,9 @@ def build_repo_message(slug: str, events: list[dict], cfg: dict) -> str:
 
 
 # ---------------------------------------------------------------- 推送接缝
-
-
-def deliver(text: str, cfg: dict, token: str) -> None:
-    """推送接缝：要加新通道（webhook / 邮件 / 别的 IM）就替换这一个函数。
-
-    默认实现是 QQ 官方 bot 的单聊主动消息；token 由 main() 取好后传进来，
-    这样换通道时不需要碰 access_token 那段逻辑。
-    """
-    send_text(cfg["openid"], text, token)
+# deliver() 已经搬进 channels.prepare()：按 cfg["channel"] 选通道，返回 send(text)。
+# 这里只保留接缝的注入点（run_round 的 deliver_fn 参数），加通道 = 在 channels.py
+# 里实现一个 _prepare_<channel>（ADR-0008）。
 
 
 # ---------------------------------------------------------------- 一轮检查
@@ -570,14 +572,14 @@ class RoundReport:
     sent: int = 0
     failures: int = 0
     skipped: str | None = None  # "lock"：上一轮仍在运行
-    status: str = "ok"  # ok / dry-run / not-sent / no-openid / token-failed / no-repos
+    status: str = "ok"  # ok / dry-run / not-sent / no-recipient / setup-failed / no-repos
 
     @property
     def exit_code(self) -> int:
         """与引入托盘前 main() 的返回值逐字一致：0 正常，1 发不出去，2 配置有问题。"""
         if self.status == "no-repos":
             return 2
-        if self.status in ("no-openid", "token-failed"):
+        if self.status in ("no-recipient", "setup-failed"):
             return 1
         return 0
 
@@ -589,17 +591,17 @@ def run_round(
     *,
     dry_run: bool = False,
     no_notify: bool = False,
-    deliver_fn: Callable[[str, dict, str], None] | None = None,
+    deliver_fn: Callable[[str], None] | None = None,
     on_event: Callable[[dict], None] | None = None,
 ) -> RoundReport:
     """跑一轮：取锁 → 逐仓库 fetch/比对 → 发送 → 落盘状态。
 
     dry_run 只打印不发送、**不推进 ref 基线**（不 save_state）；no_notify 推进状态但不发送。
-    这是本工具唯一的「一轮」实现，CLI 与托盘都走这里。
+    这是本工具唯一的「一轮」实现，CLI 与托盘都走这里。deliver_fn 是推送接缝的注入点
+    （测试/预览用），缺省用 channels.prepare(cfg, root) 现做的发送器。
     """
     lang = i18n.normalize_language(cfg.get("language"))
     run_repos = list(repos if repos is not None else cfg["repos"])
-    send = deliver_fn or deliver
     emit = on_event or (lambda _event: None)
 
     def finish(report: RoundReport) -> RoundReport:
@@ -662,31 +664,29 @@ def run_round(
             log(root, i18n.t(lang, "log.round_quiet", repos=len(run_repos)))
             return finish(RoundReport(repos=len(run_repos), failures=failures))
 
-        if not cfg.get("openid"):
-            log(root, i18n.t(lang, "log.no_openid"), "ERROR")
-            return finish(
-                RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="no-openid")
-            )
-
         try:
-            app_id, secret = load_credentials(root)
-            token = get_access_token(app_id, secret)
-        except (RuntimeError, SystemExit) as exc:
-            log(root, i18n.t(lang, "log.token_failed", error=exc), "ERROR")
+            send = deliver_fn or channels.prepare(cfg, root)
+        except channels.ChannelConfigError as exc:
+            log(root, i18n.t(lang, "log.no_recipient", error=exc), "ERROR")
             return finish(
-                RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="token-failed")
+                RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="no-recipient")
+            )
+        except channels.ChannelSetupError as exc:
+            log(root, i18n.t(lang, "log.setup_failed", error=exc), "ERROR")
+            return finish(
+                RoundReport(repos=len(run_repos), parts=pending, failures=failures, status="setup-failed")
             )
 
         sent = 0
         for index, part in enumerate(pending, 1):
             try:
-                send(part, cfg, token)
+                send(part)
                 sent += 1
                 emit({"kind": "sent", "index": index, "total": len(pending), "chars": len(part)})
                 log(root, i18n.t(lang, "log.sent_chars", chars=len(part)))
             except RuntimeError as exc:
                 log(root, i18n.t(lang, "log.send_failed", error=exc), "ERROR")
-            time.sleep(1.2)  # 单关系限速 20 条/分钟，留足余量
+            time.sleep(1.2)  # QQ 单关系 / 群机器人普遍限 20 条/分钟，留足余量
         log(root, i18n.t(lang, "log.round_done", repos=len(run_repos), failures=failures, sent=sent, total=len(pending)))
         return finish(
             RoundReport(repos=len(run_repos), parts=pending, sent=sent, failures=failures)
@@ -694,12 +694,12 @@ def run_round(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="refwatch —— GitHub 仓库监视器 -> QQ")
+    parser = argparse.ArgumentParser(description="refwatch —— GitHub 仓库监视器 -> 推送通道")
     parser.add_argument("--root", help="数据目录（镜像仓/state.json/logs），默认脚本所在目录")
     parser.add_argument("--config", help="配置文件路径（默认脚本目录下的 config.json）")
     parser.add_argument("--repo", action="append", help="只检查该仓库（可重复）")
     parser.add_argument("--dry-run", action="store_true", help="只打印消息，不发送、不推进状态")
-    parser.add_argument("--no-notify", action="store_true", help="不发 QQ，只写日志/状态")
+    parser.add_argument("--no-notify", action="store_true", help="不推送，只写日志/状态")
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve() if args.root else HERE

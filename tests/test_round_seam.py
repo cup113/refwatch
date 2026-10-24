@@ -50,23 +50,30 @@ class RoundSeamTest(unittest.TestCase):
 
     def test_missing_openid_is_exit_code_1(self) -> None:
         with mock.patch.object(watch, "check_repo", lambda *a, **k: ["msg"]):
-            report = watch.run_round(
-                self.root,
-                make_cfg(self.root, openid=""),
-                [SLUG],
-                deliver_fn=lambda *a: self.fail("缺 openid 时不应发送"),
-            )
-        self.assertEqual(report.status, "no-openid")
+            report = watch.run_round(self.root, make_cfg(self.root, openid=""), [SLUG])
+        self.assertEqual(report.status, "no-recipient")
         self.assertEqual(report.exit_code, 1)
 
-    def test_token_failure_is_exit_code_1(self) -> None:
+    def test_channel_missing_webhook_is_exit_code_1(self) -> None:
+        """wecom 缺 WECOM_WEBHOOK 与 qq 缺 openid 是同一种失败：no-recipient。"""
+        quiet = {
+            "WECOM_WEBHOOK": "",
+            "QQBOT_ENV_FILE": str(self.root / "nope.env"),
+            "DSH_HOME": str(self.root / "no-dsh"),
+        }
+        with mock.patch.object(watch, "check_repo", lambda *a, **k: ["msg"]), mock.patch.dict(
+            "os.environ", quiet
+        ):
+            report = watch.run_round(self.root, make_cfg(self.root, channel="wecom"), [SLUG])
+        self.assertEqual(report.status, "no-recipient")
+        self.assertEqual(report.exit_code, 1)
+
+    def test_setup_failure_is_exit_code_1(self) -> None:
         with mock.patch.object(watch, "check_repo", lambda *a, **k: ["msg"]), mock.patch.object(
-            watch, "load_credentials", lambda root: ("id", "secret")
-        ), mock.patch.object(watch, "get_access_token", side_effect=RuntimeError("boom")):
-            report = watch.run_round(
-                self.root, self.cfg, [SLUG], deliver_fn=lambda *a: self.fail("取 token 失败时不应发送")
-            )
-        self.assertEqual(report.status, "token-failed")
+            watch.channels, "prepare", side_effect=watch.channels.ChannelSetupError("boom")
+        ):
+            report = watch.run_round(self.root, self.cfg, [SLUG])
+        self.assertEqual(report.status, "setup-failed")
         self.assertEqual(report.exit_code, 1)
 
     def test_clean_round_is_exit_code_0(self) -> None:
@@ -76,23 +83,31 @@ class RoundSeamTest(unittest.TestCase):
         self.assertEqual(report.parts, [])
 
     # -- 发送 ----------------------------------------------------------
-    def test_parts_are_delivered_in_order_with_the_token(self) -> None:
-        sent: list[tuple[str, str]] = []
+    def test_parts_are_delivered_in_order(self) -> None:
+        sent: list[str] = []
         with mock.patch.object(watch, "check_repo", lambda *a, **k: ["a", "b"]), mock.patch.object(
-            watch, "load_credentials", lambda root: ("id", "secret")
-        ), mock.patch.object(watch, "get_access_token", lambda app_id, secret: "tok"):
-            report = watch.run_round(
-                self.root, self.cfg, [SLUG], deliver_fn=lambda part, cfg, token: sent.append((part, token))
-            )
-        self.assertEqual(sent, [("a", "tok"), ("b", "tok")])
+            watch.channels, "prepare", lambda cfg, root=None: sent.append
+        ):
+            report = watch.run_round(self.root, self.cfg, [SLUG])
+        self.assertEqual(sent, ["a", "b"])
         self.assertEqual(report.sent, 2)
         self.assertEqual(report.parts, ["a", "b"])
+
+    def test_injected_deliver_fn_beats_the_channel(self) -> None:
+        """deliver_fn 是接缝的注入点：给了它就不碰任何通道（预览/测试用）。"""
+        sent: list[str] = []
+        with mock.patch.object(watch, "check_repo", lambda *a, **k: ["msg"]), mock.patch.object(
+            watch.channels, "prepare", lambda *a, **k: self.fail("不应走到通道准备")
+        ):
+            report = watch.run_round(self.root, self.cfg, [SLUG], deliver_fn=sent.append)
+        self.assertEqual(sent, ["msg"])
+        self.assertEqual(report.sent, 1)
 
     def test_no_notify_advances_state_but_sends_nothing(self) -> None:
         sent: list[str] = []
         with mock.patch.object(watch, "check_repo", lambda *a, **k: ["msg"]):
             report = watch.run_round(
-                self.root, self.cfg, [SLUG], no_notify=True, deliver_fn=lambda part, cfg, token: sent.append(part)
+                self.root, self.cfg, [SLUG], no_notify=True, deliver_fn=sent.append
             )
         self.assertEqual(sent, [])
         self.assertEqual(report.status, "not-sent")
@@ -105,7 +120,7 @@ class RoundSeamTest(unittest.TestCase):
             watch, "say", printed.append
         ):
             report = watch.run_round(
-                self.root, self.cfg, [SLUG], dry_run=True, deliver_fn=lambda part, cfg, token: sent.append(part)
+                self.root, self.cfg, [SLUG], dry_run=True, deliver_fn=sent.append
             )
         self.assertEqual(sent, [])
         self.assertFalse((self.root / "state.json").exists(), "dry-run 不能落盘 state.json")

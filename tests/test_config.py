@@ -87,6 +87,25 @@ class ConfigTest(unittest.TestCase):
         cfg = watch.load_config(self.root, None)
         self.assertEqual(cfg["language"], "en")
 
+    def test_channel_defaults_to_qq(self) -> None:
+        cfg = watch.load_config(self.root, None)
+        self.assertEqual(cfg["channel"], "qq")
+
+    def test_invalid_channel_falls_back_with_a_warning(self) -> None:
+        self.write("config.json", repos=["a/b"], channel="msn")
+        cfg = watch.load_config(self.root, None)
+        self.assertEqual(cfg["channel"], "qq", "非法值回退 qq，不炸")
+        logs = list((self.root / "logs").glob("watch-*.log"))
+        content = "\n".join(path.read_text(encoding="utf-8") for path in logs)
+        self.assertIn("[WARN]", content)
+        self.assertIn("channel", content)
+        self.assertIn("msn", content)
+
+    def test_valid_channel_passes_through(self) -> None:
+        self.write("config.json", repos=["a/b"], channel="feishu")
+        cfg = watch.load_config(self.root, None)
+        self.assertEqual(cfg["channel"], "feishu")
+
 
 if __name__ == "__main__":
     unittest.main()

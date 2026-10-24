@@ -1,6 +1,7 @@
 # refwatch
 
-Watch **every branch and tag** of a GitHub repository and get a digest of new commits on QQ.
+Watch **every branch and tag** of a GitHub repository and get a digest of new commits pushed to the
+channel you pick (QQ / WeCom / DingTalk / Feishu / ServerChan / Bark).
 
 Two shapes, one engine, no AI in the loop:
 
@@ -8,7 +9,7 @@ Two shapes, one engine, no AI in the loop:
   run a round or preview one whenever you like.
 - **Command line**: `python watch.py`, standard library only, driven by Task Scheduler or cron.
 
-What lands in QQ:
+What lands on your phone:
 
 ```
 [acme/widget] 2 个 ref 有更新  (时间 UTC+0800)
@@ -61,10 +62,24 @@ Options: `-Dest 'D:\gh-watch'`, `-Minutes 60`, `-NoTask`.
 > The tray and the scheduled task are **alternatives** — running both only makes them skip each other
 > on `.lock`. On first start the tray asks once whether to remove the old task.
 
-Both shapes need `repos` (`["owner/name"]`), the recipient's `openid`, and the bot credentials
-`QQBOT_APPID` / `QQBOT_SECRET` (in `.env` inside the data directory; environment variables win).
-`openid` is the recipient's C2C id as reported by the bot's message events; AppID/AppSecret come from
-a bot app on the [QQ open platform](https://q.qq.com/).
+Both shapes need `repos` (`["owner/name"]`). The **push channel** is picked by `channel` in
+`config.json` (default `qq`; the settings panel's Notifications tab has the same dropdown). All
+credentials live in `.env` inside the data directory; environment variables win.
+
+| channel | `channel` | `.env` keys | notes |
+|---|---|---|---|
+| QQ official bot | `qq` | `QQBOT_APPID` / `QQBOT_SECRET`, plus `openid` in config | `openid` is the recipient's C2C id from the bot's message events; credentials from a bot app on the [QQ open platform](https://q.qq.com/) |
+| WeCom group bot | `wecom` | `WECOM_WEBHOOK` | the full webhook URL from the group's "add bot" dialog; 2048-**byte** per message, longer digests are split again |
+| DingTalk group bot | `dingtalk` | `DINGTALK_WEBHOOK` (optional `DINGTALK_SECRET`) | the secret only if the bot uses signed mode |
+| Feishu group bot | `feishu` | `FEISHU_WEBHOOK` (optional `FEISHU_SECRET`) | the secret only if signature verification is on |
+| ServerChan | `serverchan` | `SERVERCHAN_SENDKEY` | pushes to your WeChat; [5 messages/day on the free tier](https://sct.ftqq.com/) |
+| Bark (iOS) | `bark` | `BARK_KEY` (optional `BARK_SERVER`) | copy the device key from the app; point `BARK_SERVER` at a self-hosted server if you run one |
+
+Smoke-test one channel on its own, without a full round:
+
+```powershell
+python "$env:LOCALAPPDATA\refwatch\channels.py" --channel wecom --root "$env:LOCALAPPDATA\refwatch" "test"
+```
 
 Dry-run it once — nothing is sent:
 
@@ -104,7 +119,8 @@ busy repositories). Rationale: [ADR-0001](docs/adr/0001-state-is-ref-to-sha.md),
 | `max_commits_per_ref` | `15` | newest N commits listed per branch |
 | `max_chunks_per_repo` | `2` | messages per repository per round |
 | `chunk_limit` | `4500` | characters per message |
-| `openid` | `""` | recipient; falls back to `QQBOT_OPENID` |
+| `openid` | `""` | QQ channel recipient; falls back to `QQBOT_OPENID` |
+| `channel` | `"qq"` | push channel: `qq` / `wecom` / `dingtalk` / `feishu` / `serverchan` / `bark`; invalid falls back to `qq` |
 | `notify` | `true` | `false` = record state, never send |
 | `fetch_timeout_sec` | `300` | per-repository `git fetch` timeout |
 | `fail_alert_threshold` | `3` | consecutive failures before one alert |
@@ -174,6 +190,7 @@ build\tray.dist\refwatch.exe --one-round --dry-run --root <empty dir>   # smoke:
 |---|---|
 | change the watch list | tray "打开设置…", or edit `repos` in `config.json` (a new repo starts silent) |
 | make it quieter | add patterns to `exclude_ref_patterns`, e.g. `refs/heads/codex/*` |
+| switch push channel | the Notifications tab dropdown, or `channel` in `config.json`; credentials go to `.env` per the table above |
 | reset a baseline | delete that repository's entry in `state.json`, or the whole file (no button on purpose) |
 | fix a broken mirror | delete `repos/<owner>__<name>.git`; it is rebuilt next round (delete its state entry to skip the backlog) |
 | mute temporarily | "暂停调度" in the tray, or `notify: false` |
@@ -220,7 +237,8 @@ The suite is offline: throwaway repositories under the system temp dir (override
 | file | role |
 |---|---|
 | `watch.py` | engine + CLI; `run_round()` is the only implementation of a round |
-| `qq_notify.py` | QQ API + credential lookup, usable standalone |
+| `qq_notify.py` | QQ API + the HTTP / `.env` helpers shared by all channels, usable standalone |
+| `channels.py` | the channel registry and one sender per channel; has a `--channel` smoke CLI |
 | `i18n.py` | the two-language string table + `t()`: single source of all runtime text |
 | `settings.py` | `config.json` / `.env` / autostart registry reads and writes (no GUI imports) |
 | `scheduler.py` | fires a round every `interval_minutes` |
@@ -229,8 +247,9 @@ The suite is offline: throwaway repositories under the system temp dir (override
 | `install.ps1` / `installer.iss` | headless deploy / tray installer |
 | `tools/` | `window_probe.py` (window regression check), `make_icon.py` (icon generator, artifacts committed) |
 
-A delivery channel is one function — `deliver()` in `watch.py`
-([ADR-0004](docs/adr/0004-qq-only-with-notifier-seam.md)). Tray history and trade-offs:
+A delivery channel is one function — `_prepare_<channel>()` in `channels.py`
+([ADR-0008](docs/adr/0008-multi-channel-push.md); the seam started as `deliver()` in
+[ADR-0004](docs/adr/0004-qq-only-with-notifier-seam.md)). Tray history and trade-offs:
 [ADR-0005](docs/adr/0005-tray-app-replaces-scheduled-task.md),
 [ADR-0006](docs/adr/0006-tray-stack-pystray-pillow-tk.md),
 [ADR-0007](docs/adr/0007-distribution-nuitka-standalone-inno.md).
@@ -243,6 +262,8 @@ Release history: [CHANGELOG.md](CHANGELOG.md).
 
 - Long digests as a **file** upload: truncated with a compare link instead.
 - **Retry queue** for failed sends: logged, collected again next round.
+- **Pushing to several channels at once**: `channel` is single-choice; Telegram, a generic webhook
+  and Pushover are on the candidate list for later (ADR-0008).
 - LLM summaries: that would put an AI back in the loop.
 - Destructive maintenance in the panel (reset baseline / delete mirror): v1 edits config and previews only.
 - Code signing, auto-update, single-file exe.

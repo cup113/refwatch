@@ -10,6 +10,12 @@
 
 ### 新增
 
+- **多通道推送**：`config.json` 新增 `channel`（默认 `qq`），除 QQ 官方机器人外首批支持
+  企业微信群机器人（`wecom`）、钉钉（`dingtalk`）、飞书（`feishu`）、Server酱（`serverchan`）、
+  Bark（`bark`）；凭据统一写数据目录 `.env`（环境变量优先），钉钉/飞书的可选加签、Server酱/Bark
+  的自托管地址都支持。设置面板「通知」页改为通道下拉 + 按通道切换的凭据字段（来回切不丢输入），
+  `channels.py` 自带 `--channel` 冒烟 CLI（[ADR-0008](docs/adr/0008-multi-channel-push.md)）。
+- 企业微信通道单条 2048 **字节**上限按 UTF-8 贪心再分片（按字符切对 CJK 会超限）。
 - **语言统一**（#2）：`config.json` 新增 `language`（`zh` / `en`，默认 `zh`），翻转全部
   运行时文案 —— 摘要、日志行、托盘菜单/状态/弹框、设置面板、面板事件行；
   commit message 等数据不翻译。文案集中在新的 `i18n.py` 双语表，测试守着两张表键一致。
@@ -21,6 +27,10 @@
 - `qq_notify.py` 抛出的错误串改为英文中性诊断文本（内嵌原始 API 返回），
   人话前缀由 `watch.py` 的捕获点按 `language` 翻译。
 - `docs/screenshots/` 补全英文界面五页截图，`panel-schedule.png` 重拍（多了语言选择）。
+- 一轮的推送状态改名为通道中性：`no-openid`/`token-failed` → `no-recipient`/`setup-failed`
+  （退出码契约不变：都映射 1）；QQ 缺 AppID/Secret 从「准备失败」挪到「接收方/凭据未配置」。
+- 托盘崩溃日志的凭据脱敏覆盖所有通道的 `.env` 键（webhook/SendKey/Bark key）；
+  适配器报错串里的 webhook URL 只保留路径，key 不进日志。
 
 ## [1.0.0] - 2026-10-22
 

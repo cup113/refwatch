@@ -59,7 +59,7 @@ if (Test-Path $pythonw) {
     Write-Warning "没有 pythonw.exe：计划任务会每轮闪一次控制台窗口（git 子进程另有防护）"
 }
 
-$programFiles = @('watch.py', 'qq_notify.py', 'settings.py', 'i18n.py', 'scheduler.py', 'panel.py', 'tray.py')
+$programFiles = @('watch.py', 'qq_notify.py', 'channels.py', 'settings.py', 'i18n.py', 'scheduler.py', 'panel.py', 'tray.py')
 foreach ($name in $programFiles) {
     if (-not (Test-Path (Join-Path $Source $name))) { Fail "缺少源文件: $(Join-Path $Source $name)" }
 }

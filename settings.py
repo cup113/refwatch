@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 # 与 watch.py 同样的发布形态：模块平铺在程序目录里。
 sys.path.insert(0, str(HERE))
 
+import channels  # noqa: E402
 import qq_notify  # noqa: E402
 import watch  # noqa: E402
 from i18n import normalize_language, t  # noqa: E402
@@ -247,6 +248,13 @@ def validate(values: dict, lang: str = "zh") -> list[str]:
         else:
             values["language"] = language
 
+    if "channel" in values:
+        channel = values.get("channel")
+        if not isinstance(channel, str) or channel not in channels.CHANNELS:
+            errors.append(t(lang, "validate.channel"))
+        else:
+            values["channel"] = channel
+
     for key in ("notify", "autostart", "task_prompt_done"):
         if key in values and not isinstance(values[key], bool):
             errors.append(t(lang, "validate.bool", key=key))
@@ -258,7 +266,10 @@ def validate(values: dict, lang: str = "zh") -> list[str]:
         else:
             values["openid"] = openid.strip()
 
-    for key in ENV_KEYS:
+    all_env_keys = set(ENV_KEYS)
+    for code in channels.CHANNELS:  # 所有通道的 .env 键都不许出现在 config.json 里
+        all_env_keys.update(channels.env_keys_of(code))
+    for key in sorted(all_env_keys):
         if key in values:  # 常见误操作：把密钥写进 config.json
             errors.append(t(lang, "validate.secret_conflict", key=key))
     return errors
@@ -267,13 +278,17 @@ def validate(values: dict, lang: str = "zh") -> list[str]:
 # ---------------------------------------------------------------- .env
 
 
-def save_secrets(root: Path, appid: str, secret: str) -> Path:
-    """只改写 QQBOT_APPID / QQBOT_SECRET 两行，其余行、注释、顺序、行尾风格全部保留。"""
+def save_secrets(root: Path, values: dict[str, str]) -> Path:
+    """只改写给出的键=value 行，其余行、注释、顺序、行尾风格全部保留。
+
+    键集合由调用方决定（面板按所选通道传 channels.CREDENTIALS 的键），
+    算法本身与具体通道无关。
+    """
     path = env_path(root)
     raw = path.read_bytes() if path.is_file() else b""
     text = raw.decode("utf-8-sig", errors="replace")
     eol = "\r\n" if "\r\n" in text else "\n"
-    wanted = dict(zip(ENV_KEYS, (appid.strip(), secret.strip())))
+    wanted = {key: str(value).strip() for key, value in values.items()}
     kept: list[str] = []
     seen: set[str] = set()
     for line in text.splitlines():
@@ -299,9 +314,28 @@ def save_secrets(root: Path, appid: str, secret: str) -> Path:
     return path
 
 
-def read_secrets(root: Path) -> dict:
-    """凭据现在从哪读来的（环境变量 / 某个 .env），供面板显示。"""
-    return qq_notify.read_credentials(Path(root))
+def read_secrets(root: Path, channel: str = "qq") -> dict:
+    """所选通道的凭据现在从哪读来的（环境变量 / 某个 .env），供面板显示。
+
+    qq 沿用旧形状 {"appid","secret","source"}；其它通道返回 {<env键小写>: 值, "source"}。
+    """
+    code = channels.normalize_channel(channel)
+    if code == "qq":
+        return qq_notify.read_credentials(Path(root))
+    env_keys = channels.env_keys_of(code)
+    found = qq_notify.read_env_values(env_keys, Path(root))
+    out: dict[str, str] = {key.lower(): value for key, value in found.items()}
+    source = ""
+    if any(os.environ.get(key, "") for key in env_keys):
+        source = qq_notify.ENV_SOURCE
+    else:
+        for path in qq_notify.env_file_candidates(Path(root)):
+            file_values = qq_notify.read_env_file(path)
+            if any(file_values.get(key, "") for key in env_keys):
+                source = str(path)
+                break
+    out["source"] = source
+    return out
 
 
 # ---------------------------------------------------------------- 开机自启

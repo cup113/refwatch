@@ -1,13 +1,14 @@
 # refwatch
 
-盯住一个 GitHub 仓库的**所有分支和 tag**，有变化就往 QQ 推一条摘要（提交清单 + compare 链接）。
+盯住一个 GitHub 仓库的**所有分支和 tag**，有变化就往你选的通道（QQ / 企业微信 / 钉钉 / 飞书 /
+Server酱 / Bark）推一条摘要（提交清单 + compare 链接）。
 
 两种形态，同一套引擎，都不经过 AI：
 
 - **托盘应用**（Windows 默认）：常驻通知区域，配置在窗口里改，随时「立即跑一轮」或「预览」。
 - **命令行**：`python watch.py`，只用标准库，交给计划任务或 cron。
 
-推到 QQ 的东西长这样：
+推出来的内容长这样：
 
 ```
 [acme/widget] 2 个 ref 有更新  (时间 UTC+0800)
@@ -58,10 +59,23 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 > 托盘和计划任务是**二选一**：同时存在只会在 `.lock` 上互相跳过。托盘首次启动会问一次要不要移除旧任务。
 
-两种形态都至少需要：`repos`（`["owner/name"]`）、接收方 `openid`，
-以及机器人凭据 `QQBOT_APPID` / `QQBOT_SECRET`（写在数据目录的 `.env`，环境变量优先）。
-`openid` 是接收方的 C2C id：让机器人收到对方一条消息后从事件体里读。
-AppID/AppSecret 来自 [QQ 开放平台](https://q.qq.com/) 的机器人应用。
+两种形态都至少需要 `repos`（`["owner/name"]`）。**推送通道**由 `config.json` 的 `channel` 选择
+（默认 `qq`；设置面板「通知」页的下拉同效），凭据一律写数据目录的 `.env`（环境变量优先）：
+
+| 通道 | `channel` | 要配的 `.env` | 说明 |
+|---|---|---|---|
+| QQ 官方机器人 | `qq` | `QQBOT_APPID` / `QQBOT_SECRET`，另加 config 的 `openid` | openid 是接收方的 C2C id：让机器人收到对方一条消息后从事件体里读；凭据来自 [QQ 开放平台](https://q.qq.com/) |
+| 企业微信群机器人 | `wecom` | `WECOM_WEBHOOK` | 群设置里「添加群机器人」拿到整条 webhook 地址；单条 ≤2048 字节，超长自动再分片 |
+| 钉钉群机器人 | `dingtalk` | `DINGTALK_WEBHOOK`（可选 `DINGTALK_SECRET`） | 安全设置选「加签」时才需要 secret |
+| 飞书群机器人 | `feishu` | `FEISHU_WEBHOOK`（可选 `FEISHU_SECRET`） | 开启「签名校验」时才需要 secret |
+| Server酱 | `serverchan` | `SERVERCHAN_SENDKEY` | 推到微信服务号；[免费版每天 5 条](https://sct.ftqq.com/) |
+| Bark（iOS） | `bark` | `BARK_KEY`（可选 `BARK_SERVER`） | App 里复制设备 key；自托管填自己的服务器地址 |
+
+配好后可以先单独冒烟一条，不跑完整一轮：
+
+```powershell
+python "$env:LOCALAPPDATA\refwatch\channels.py" --channel wecom --root "$env:LOCALAPPDATA\refwatch" "测试"
+```
 
 先试跑一次，不发送任何消息：
 
@@ -100,7 +114,8 @@ python -X utf8 "$env:LOCALAPPDATA\refwatch\watch.py" --root "$env:LOCALAPPDATA\r
 | `max_commits_per_ref` | `15` | 每个分支最多列几条新提交 |
 | `max_chunks_per_repo` | `2` | 每仓库每轮最多发几条 |
 | `chunk_limit` | `4500` | 单条消息字数上限 |
-| `openid` | `""` | 接收方；也可用环境变量 `QQBOT_OPENID` |
+| `openid` | `""` | QQ 通道的接收方；也可用环境变量 `QQBOT_OPENID` |
+| `channel` | `"qq"` | 推送通道：`qq` / `wecom` / `dingtalk` / `feishu` / `serverchan` / `bark`；非法值回退 `qq` |
 | `notify` | `true` | `false` = 只记录状态，从不发送 |
 | `fetch_timeout_sec` | `300` | 单仓库 `git fetch` 超时 |
 | `fail_alert_threshold` | `3` | 连续失败多少次后发一条告警 |
@@ -169,6 +184,7 @@ build\tray.dist\refwatch.exe --one-round --dry-run --root <空目录>   # 冒烟
 | 重建基线 | 删掉 `state.json` 里该仓库的条目，或整个删掉 `state.json`（面板故意不提供按钮） |
 | 镜像仓坏了 | 删掉 `repos\<owner>__<name>.git`，下一轮自动重建；不想要积压就同时删掉它的状态条目 |
 | 临时静音 | 托盘「暂停调度」，或把 `notify` 设成 `false` |
+| 换推送通道 | 设置面板「通知」页下拉选择，或改 `config.json` 的 `channel`；凭据按上面的表写 `.env` |
 | 看发生了什么 | `logs/watch-YYYYMMDD.log`；异常看 `logs/crash.log`（托盘）或 `logs/error.log`（CLI） |
 | 想回到计划任务 | 托盘退出，重跑 `install.ps1`。配置和基线都不动 |
 
@@ -210,7 +226,8 @@ python -m pip install -r requirements-gui.txt  # 只有要跑托盘/打包才需
 | 文件 | 作用 |
 |---|---|
 | `watch.py` | 引擎 + CLI：`run_round()` 是「一轮」的唯一实现 |
-| `qq_notify.py` | QQ API + 凭据读取，可单独当命令行工具用 |
+| `qq_notify.py` | QQ API + 多通道共用的 HTTP / `.env` 助手，可单独当命令行工具用 |
+| `channels.py` | 推送通道注册表与各通道发送器；自带 `--channel` 冒烟 CLI |
 | `i18n.py` | 两语言文案表 + `t()`：全部运行时字符串的唯一来源 |
 | `settings.py` | `config.json` / `.env` / 自启注册表的读写校验（无 GUI 依赖） |
 | `scheduler.py` | 按 `interval_minutes` 触发一轮 |
@@ -219,7 +236,8 @@ python -m pip install -r requirements-gui.txt  # 只有要跑托盘/打包才需
 | `install.ps1` / `installer.iss` | 无头部署 / 托盘安装包 |
 | `tools/` | `window_probe.py`（窗口回归检查）、`make_icon.py`（图标生成，产物入库） |
 
-加一种推送通道 = 替换 `watch.py` 里的一个函数 `deliver()`（[ADR-0004](docs/adr/0004-qq-only-with-notifier-seam.md)）。
+加一种推送通道 = 在 `channels.py` 里实现一个 `_prepare_<channel>()`（[ADR-0008](docs/adr/0008-multi-channel-push.md)，
+接缝的前身见 [ADR-0004](docs/adr/0004-qq-only-with-notifier-seam.md)）。
 托盘形态的来龙去脉：[ADR-0005](docs/adr/0005-tray-app-replaces-scheduled-task.md)、
 [ADR-0006](docs/adr/0006-tray-stack-pystray-pillow-tk.md)、
 [ADR-0007](docs/adr/0007-distribution-nuitka-standalone-inno.md)。
@@ -232,6 +250,8 @@ python -m pip install -r requirements-gui.txt  # 只有要跑托盘/打包才需
 
 - 超长摘要降级为**文件**上传：目前用「截断 + compare 链接」代替。
 - 发送失败的**重试队列**：只记日志，下一轮重新攒。
+- **多通道并行发送**（一次变化发往多个目的地）：`channel` 单选；Telegram、通用 webhook、
+  Pushover 等在候选清单里，按需再进（ADR-0008）。
 - LLM 语义化摘要：那会把 AI 放回环内。
 - 面板里的破坏性运维（重置基线 / 删镜像仓）：v1 只做配置与预览。
 - 代码签名、自动更新、单文件 exe。
