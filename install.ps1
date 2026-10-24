@@ -59,7 +59,7 @@ if (Test-Path $pythonw) {
     Write-Warning "没有 pythonw.exe：计划任务会每轮闪一次控制台窗口（git 子进程另有防护）"
 }
 
-$programFiles = @('watch.py', 'qq_notify.py', 'settings.py', 'scheduler.py', 'panel.py', 'tray.py')
+$programFiles = @('watch.py', 'qq_notify.py', 'settings.py', 'i18n.py', 'scheduler.py', 'panel.py', 'tray.py')
 foreach ($name in $programFiles) {
     if (-not (Test-Path (Join-Path $Source $name))) { Fail "缺少源文件: $(Join-Path $Source $name)" }
 }
@@ -86,7 +86,7 @@ if ($assetFiles) {
     foreach ($asset in $assetFiles) { Copy-Item $asset (Join-Path $Dest 'assets') -Force }
 }
 Copy-Item $exampleConfig $Dest -Force
-Ok "watch.py / 托盘模块（settings / scheduler / panel / tray）/ assets / 文档 / config.example.json"
+Ok "watch.py / 托盘模块（settings / i18n / scheduler / panel / tray）/ assets / 文档 / config.example.json"
 
 Step "3/6 配置文件（绝不覆盖已有配置）"
 $configPath = Join-Path $Dest 'config.json'
